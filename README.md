@@ -17,14 +17,21 @@ MCP Client ── tools/call ──▶ mcp-policy-guard ──▶ MCP Server
                               └───────────┘
 ```
 
-## Features (v0.1)
+## Features
 
+**Core (v0.1)**
 - **Tool allowlist** — glob matching on tool names, first-match-wins rules, default deny
 - **Human-in-the-loop approval** — interactive `/dev/tty` prompt (Unix) with webhook fallback
 - **Audit logging** — structured JSON to stderr, JSONL file with rotation, batched webhook POST
 - **Redaction** — field-name and regex-based redaction of sensitive data in audit records
 - **Agent card derivation** — reads a FINOS Agent Card and derives rules from `approvedActionList` and `humanOversightModel`
 - **Policy validation** — YAML with `${VAR}` expansion, validated against JSON Schema on load
+
+**Policy intelligence (v0.2)**
+- **CEL expressions** — match rules on tool call arguments (e.g., `double(args.amount) > 1000000.0`, `args.sql.matches('(?i)DROP')`)
+- **Rate limiting** — in-memory token bucket, per-agent/per-tool/global keys, configurable deny messages
+- **Content filters** — regex-based PII detection and prompt injection scanning on request/response, with block/redact/flag actions
+- **Escalation webhooks** — fire-and-forget notifications to Alertmanager, PagerDuty, or generic webhooks on rule match, rate limit exceed, or content filter hit
 
 ## Quick start
 
@@ -100,11 +107,14 @@ Or in your MCP client config (e.g., Claude Code):
 
 mcp-policy-guard spawns the MCP server as a child process and relays stdio. It parses each line as JSON-RPC 2.0, and for `tools/call` requests:
 
-1. Matches the tool name against policy rules (glob patterns, first match wins)
-2. **allow** — forwards to the server
-3. **deny** — returns a JSON-RPC error to the client
-4. **require_approval** — prompts via `/dev/tty` or webhook, then forwards or rejects
-5. Emits a structured audit record for every intercepted call
+1. Checks **rate limits** — rejects if the agent/tool has exceeded its budget
+2. Runs **content filters** — blocks if PII or injection patterns are detected in arguments
+3. Matches the tool name (and optionally CEL expressions on arguments) against **policy rules** (first match wins)
+4. **allow** — forwards to the server
+5. **deny** — returns a JSON-RPC error to the client
+6. **require_approval** — prompts via `/dev/tty` or webhook, then forwards or rejects
+7. Fires **escalation webhooks** if the matched rule, rate limit, or content filter is configured to escalate
+8. Emits a structured **audit record** for every intercepted call
 
 All other MCP methods (`initialize`, `tools/list`, `resources/*`, `prompts/*`, `ping`) pass through unmodified.
 
@@ -159,8 +169,7 @@ volumes:
 
 ## Roadmap
 
-- **v0.2** — CEL expressions on tool arguments, escalation webhooks, rate limiting, content filters (PII/DLP)
-- **v0.3** — argument mutation, time-window rules, Slack approval, OTel audit output, `tools/list` filtering
+- **v0.3** — argument mutation, time-window rules, Slack approval, OTel audit output, `tools/list` filtering, Redis-backed rate limiting
 
 See [PRD.md](PRD.md) for the full product requirements.
 

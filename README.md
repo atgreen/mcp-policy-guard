@@ -40,11 +40,19 @@ MCP Client ── tools/call ──▶ mcp-policy-guard ──▶ MCP Server
 - **Slack approval** — interactive Slack messages with approve/reject buttons for team-based human-in-the-loop workflows
 - **OTel audit output** — emit audit records as OpenTelemetry spans via OTLP gRPC or HTTP
 
+**Production deployment (v0.4)**
+- **HTTP reverse proxy** — sits in front of any streamable HTTP MCP endpoint, full policy enforcement including SSE keepalives during approval holds
+- **Redis-backed rate limiting** — shared counters across multiple instances via `--redis` flag
+- **Approval delegation** — route approval requests to different channels based on tool name or agent identity patterns
+- **Policy hot-reload** — file watcher detects changes and reloads policy without restart (works with Kubernetes ConfigMap mounts)
+
 ## Quick start
 
 ```bash
 go install github.com/atgreen/mcp-policy-guard@latest
 ```
+
+### stdio mode (wrap an MCP server)
 
 Create a policy file (`policy.yaml`):
 
@@ -108,6 +116,25 @@ Or in your MCP client config (e.g., Claude Code):
     }
   }
 }
+```
+
+### HTTP mode (reverse proxy in front of a gateway)
+
+```bash
+mcp-policy-guard \
+  --policy policy.yaml \
+  --listen :8081 \
+  --upstream http://mcp-gateway:8080/mcp
+```
+
+With Redis-backed rate limiting for multi-instance deployments:
+
+```bash
+mcp-policy-guard \
+  --policy policy.yaml \
+  --listen :8081 \
+  --upstream http://mcp-gateway:8080/mcp \
+  --redis redis://redis:6379
 ```
 
 ## How it works
@@ -176,7 +203,7 @@ volumes:
 
 ## Roadmap
 
-- **v0.4** — HTTP reverse proxy transport, Redis-backed rate limiting, approval delegation rules, Kubernetes ConfigMap watching
+- **v1.0** — Stable API, Helm chart, container image, comprehensive documentation
 
 See [PRD.md](PRD.md) for the full product requirements.
 

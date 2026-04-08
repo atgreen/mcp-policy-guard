@@ -9,8 +9,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,15 +34,18 @@ func main() {
 	policyPath := flag.String("policy", "", "Path to policy YAML file (required)")
 	agentIdentity := flag.String("agent-identity", "", "Static agent identity for stdio mode")
 	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
+	listenAddr := flag.String("listen", "", "HTTP listen address (e.g., :8081). Enables HTTP proxy mode.")
+	upstream := flag.String("upstream", "", "Upstream MCP endpoint URL (required for HTTP mode)")
+	redisURL := flag.String("redis", "", "Redis URL for shared rate limiting (e.g., redis://localhost:6379)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: mcp-policy-guard --policy <path> [options] -- <command> [args...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, "  stdio:  mcp-policy-guard --policy <path> [options] -- <command> [args...]\n")
+		fmt.Fprintf(os.Stderr, "  http:   mcp-policy-guard --policy <path> --listen :8081 --upstream http://mcp-gateway:8080/mcp\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nThe command after -- is the MCP server to wrap.\n")
 	}
 	flag.Parse()
 
-	// Configure structured logging to stderr (stdout is JSON-RPC)
 	configureLogging(*logLevel)
 
 	if *policyPath == "" {
@@ -49,12 +54,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Child command is everything after --
+	// Determine mode
+	httpMode := *listenAddr != ""
 	childArgs := flag.Args()
-	if len(childArgs) == 0 {
-		slog.Error("no child command specified after --")
-		flag.Usage()
-		os.Exit(1)
+
+	if httpMode {
+		if *upstream == "" {
+			slog.Error("--upstream is required in HTTP mode")
+			os.Exit(1)
+		}
+	} else {
+		if len(childArgs) == 0 {
+			slog.Error("no child command specified after -- (or use --listen for HTTP mode)")
+			flag.Usage()
+			os.Exit(1)
+		}
 	}
 
 	// Load schema for policy validation
@@ -106,10 +120,19 @@ func main() {
 	// Build approval registry
 	approvalReg := approval.NewRegistry(pol.Approval)
 
-	// Build rate limiter
-	limiter := ratelimit.NewLimiter(pol.RateLimits)
-	if len(pol.RateLimits) > 0 {
-		slog.Info("rate limits loaded", "count", len(pol.RateLimits))
+	// Build rate limiter (Redis or in-memory)
+	var limiter ratelimit.Checker
+	if *redisURL != "" && len(pol.RateLimits) > 0 {
+		rl, err := ratelimit.NewRedisLimiter(pol.RateLimits, *redisURL)
+		if err != nil {
+			slog.Error("failed to connect to Redis for rate limiting", "error", err)
+			os.Exit(1)
+		}
+		limiter = rl
+		slog.Info("rate limits loaded (Redis)", "count", len(pol.RateLimits))
+	} else if len(pol.RateLimits) > 0 {
+		limiter = ratelimit.NewLimiter(pol.RateLimits)
+		slog.Info("rate limits loaded (in-memory)", "count", len(pol.RateLimits))
 	}
 
 	// Build content filter engine
@@ -121,8 +144,22 @@ func main() {
 	// Build escalation dispatcher
 	escalator := escalation.NewDispatcher(pol.Escalation)
 
-	// Build and run stdio proxy
-	proxy := transport.NewStdioProxy(eng, pipeline, redactor, approvalReg, pol.Approval, limiter, cfEngine, escalator, identity, childArgs)
+	// Set up policy file watcher for hot-reload
+	watcher, err := policy.NewWatcher(*policyPath, func() {
+		newPol, err := policy.Load(*policyPath)
+		if err != nil {
+			slog.Error("failed to reload policy", "error", err)
+			return
+		}
+		eng.Reload(newPol)
+		slog.Info("policy reloaded", "rules", len(newPol.Rules))
+	})
+	if err != nil {
+		slog.Warn("failed to start policy watcher, hot-reload disabled", "error", err)
+	} else {
+		defer watcher.Close()
+		slog.Info("policy file watcher started", "path", *policyPath)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -136,9 +173,36 @@ func main() {
 		cancel()
 	}()
 
-	if err := proxy.Run(ctx); err != nil {
-		slog.Error("proxy exited with error", "error", err)
-		os.Exit(1)
+	if httpMode {
+		// HTTP reverse proxy mode
+		identityFunc := func(r *http.Request) string {
+			// Try X-Agent-Id header first, then JWT sub, then static
+			if id := r.Header.Get("X-Agent-Id"); id != "" {
+				return id
+			}
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				// Simple JWT sub extraction would go here
+				// For now, use the static identity
+			}
+			return identity
+		}
+
+		proxy := transport.NewHTTPProxy(eng, pipeline, redactor, approvalReg, pol.Approval,
+			limiter, cfEngine, escalator, *upstream, *listenAddr, identityFunc)
+
+		if err := proxy.Run(ctx); err != nil {
+			slog.Error("HTTP proxy exited with error", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		// stdio proxy mode
+		proxy := transport.NewStdioProxy(eng, pipeline, redactor, approvalReg, pol.Approval,
+			limiter, cfEngine, escalator, identity, childArgs)
+
+		if err := proxy.Run(ctx); err != nil {
+			slog.Error("proxy exited with error", "error", err)
+			os.Exit(1)
+		}
 	}
 }
 
@@ -171,7 +235,6 @@ func resolveStaticIdentity(pol *policy.Policy) string {
 
 func buildAuditEmitters(cfg *policy.AuditConfig) ([]audit.Emitter, error) {
 	if cfg == nil {
-		// Default: JSON to stderr
 		return []audit.Emitter{audit.NewStderrEmitter("json")}, nil
 	}
 
@@ -179,7 +242,6 @@ func buildAuditEmitters(cfg *policy.AuditConfig) ([]audit.Emitter, error) {
 	for _, out := range cfg.Outputs {
 		switch out.Type {
 		case "stdout":
-			// In stdio mode, "stdout" actually goes to stderr
 			format := out.Format
 			if format == "" {
 				format = "json"

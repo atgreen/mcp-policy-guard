@@ -53,10 +53,19 @@ type IdentitySource struct {
 
 // ApprovalConfig defines approval channels and global settings.
 type ApprovalConfig struct {
-	Channels           []ApprovalChannel `yaml:"channels"`
-	Timeout            Duration          `yaml:"timeout,omitempty"`
-	OnTimeout          string            `yaml:"on_timeout,omitempty"`            // reject | escalate | allow
-	EscalateOnTimeoutTo string           `yaml:"escalate_on_timeout_to,omitempty"` // escalation channel name
+	Channels           []ApprovalChannel  `yaml:"channels"`
+	Timeout            Duration           `yaml:"timeout,omitempty"`
+	OnTimeout          string             `yaml:"on_timeout,omitempty"`            // reject | escalate | allow
+	EscalateOnTimeoutTo string            `yaml:"escalate_on_timeout_to,omitempty"` // escalation channel name
+	DelegationRules    []DelegationRule   `yaml:"delegation_rules,omitempty"`
+}
+
+// DelegationRule routes approval requests to channels based on tool/agent patterns.
+type DelegationRule struct {
+	Name    string   `yaml:"name"`
+	Tools   []string `yaml:"tools,omitempty"`
+	Agents  []string `yaml:"agents,omitempty"`
+	Channel string   `yaml:"channel"`
 }
 
 // ApprovalChannel defines a named approval mechanism.

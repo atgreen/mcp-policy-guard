@@ -17,7 +17,12 @@ type Result struct {
 	Message  string
 }
 
-// Limiter evaluates rate limits for tool calls.
+// Checker is the interface for rate limit backends (in-memory or Redis).
+type Checker interface {
+	Check(toolName, agentIdentity string) Result
+}
+
+// Limiter evaluates rate limits for tool calls using in-memory token buckets.
 type Limiter struct {
 	rules   []policy.RateLimit
 	mu      sync.Mutex

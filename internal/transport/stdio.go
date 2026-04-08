@@ -37,7 +37,7 @@ type StdioProxy struct {
 	redactor      *audit.Redactor
 	approvalReg   *approval.Registry
 	approvalCfg   *policy.ApprovalConfig
-	rateLimiter   *ratelimit.Limiter
+	rateLimiter   ratelimit.Checker
 	contentFilter *contentfilter.Engine
 	escalator     *escalation.Dispatcher
 	agentIdentity string
@@ -51,7 +51,7 @@ func NewStdioProxy(
 	redactor *audit.Redactor,
 	approvalReg *approval.Registry,
 	approvalCfg *policy.ApprovalConfig,
-	rateLimiter *ratelimit.Limiter,
+	rateLimiter ratelimit.Checker,
 	contentFilter *contentfilter.Engine,
 	escalator *escalation.Dispatcher,
 	agentIdentity string,

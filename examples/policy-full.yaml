@@ -1,0 +1,405 @@
+# mcp-policy-guard example policy
+# Version: 1
+#
+# This is a documentation example. Active (uncommented) fields are valid
+# against the v0.1 schema (policy-schema.json). Planned features are
+# commented out and annotated with their target version.
+#
+# The schema ships with each release and defines exactly the fields that
+# version supports. Unknown fields are rejected on load.
+#
+#   [v0.1] — P0, available at launch
+#   [v0.2] — P1, second release (adds CEL, escalation, rate limits, content filters)
+#   [v0.3] — P2, future (adds mutate, time windows, Slack approval, OTel audit)
+
+---
+
+version: 1                              # [v0.1] Required. Must be 1.
+
+# --------------------------------------------------------------------------
+# agent_card [v0.1] (optional)
+# --------------------------------------------------------------------------
+# Path or URL to a FINOS Agent Card. When provided, mcp-policy-guard
+# derives baseline rules automatically:
+#   - governance.approvedActionList    -> tool allowlist
+#   - governance.humanOversightModel   -> default approval requirements
+#   - governance.escalationContacts    -> escalation webhooks (v0.2)
+#   - agentSecurity.rateLimiting       -> rate limit enablement (v0.2)
+#
+# Explicit rules in this file override anything derived from the card.
+# When agent_card is set, rules are optional (can be derived entirely
+# from the card).
+# --------------------------------------------------------------------------
+agent_card:
+  # Exactly one of path, url, or configmap must be set (enforced by schema).
+  path: ./agent-card.json
+  # url: https://agent.internal/.well-known/agent-card.json
+  # configmap: namespace/agent-card-cm       # Kubernetes ConfigMap ref
+  watch: true                                 # Re-read on change (file/CM)
+
+# --------------------------------------------------------------------------
+# defaults [v0.1]
+# --------------------------------------------------------------------------
+# Applied to every tool call that doesn't match an explicit rule.
+# --------------------------------------------------------------------------
+defaults:
+  action: deny            # deny | allow | audit_only
+  audit: true             # Log every tool call regardless of action
+  deny_message: "Tool call not permitted by policy"
+
+# --------------------------------------------------------------------------
+# identity [v0.1]
+# --------------------------------------------------------------------------
+# How mcp-policy-guard identifies the calling agent. Used as the key for
+# per-agent rate limiting, audit attribution, and approval routing.
+# --------------------------------------------------------------------------
+identity:
+  # In HTTP mode, extract identity from request headers or JWT claims.
+  # In stdio mode, identity is set statically via CLI flag or this block.
+  sources:
+    - type: jwt_claim           # Extract from Authorization: Bearer <jwt>
+      claim: sub                # JWT claim name
+      header: Authorization     # Header containing the token
+    - type: header              # Extract from a custom header
+      header: X-Agent-Id
+    - type: client_cert         # Extract from mTLS client certificate
+      field: cn                 # cn | san_dns | san_uri
+    - type: static              # Fallback for stdio mode
+      value: "local-agent"
+  # First matching source wins.
+
+# --------------------------------------------------------------------------
+# approval [v0.1]
+# --------------------------------------------------------------------------
+# Global configuration for human-in-the-loop approval.
+# Individual rules reference these channels by name.
+# --------------------------------------------------------------------------
+approval:
+  channels:
+    - name: terminal
+      type: terminal            # [v0.1] Interactive prompt via /dev/tty (Unix only)
+      # NOTE: In stdio mode, stdin/stdout carry JSON-RPC. The terminal
+      # channel opens /dev/tty directly (like sudo/ssh) to reach the
+      # controlling terminal. This only works when:
+      #   - Running on Unix (Linux/macOS)
+      #   - A controlling terminal exists (not CI, not containers, not bg)
+      # Falls back to the named channel if /dev/tty is unavailable.
+      show_args: true           # Display tool call arguments in prompt
+      show_context: false       # Display surrounding agent context
+      fallback: webhook         # Channel name to use if no tty available
+
+    - name: webhook
+      type: webhook             # [v0.1] HTTP callback (HTTP mode, Kubernetes)
+      endpoint: https://approvals.internal/api/review
+      method: POST
+      headers:
+        Authorization: "Bearer ${APPROVAL_TOKEN}"
+      # mcp-policy-guard POSTs the pending request, then polls or waits
+      # for a callback to its own /approval/{request_id} endpoint.
+      callback_mode: callback   # callback | poll
+      poll_interval: 5s         # Only used when callback_mode: poll
+
+    # [v0.3] Slack approval channel (interactive message buttons).
+    # - name: slack
+    #   type: slack
+    #   webhook_url: "${SLACK_APPROVAL_WEBHOOK}"
+    #   channel: "#agent-approvals"
+    #   callback_url: https://policy-guard.internal/slack/callback
+
+  # Default timeout for all approval holds.
+  timeout: 300s                 # Max time to wait for approval
+  on_timeout: reject            # reject | allow
+  # [v0.2] adds on_timeout: escalate and escalate_on_timeout_to
+
+# --------------------------------------------------------------------------
+# [v0.2] escalation
+# --------------------------------------------------------------------------
+# Where to send alerts when escalation triggers fire.
+# Uncomment when running v0.2+.
+# --------------------------------------------------------------------------
+# escalation:
+#   channels:
+#     - name: oncall
+#       type: webhook
+#       endpoint: https://alertmanager.internal/api/v2/alerts
+#       method: POST
+#       headers:
+#         Authorization: "Bearer ${ALERTMANAGER_TOKEN}"
+#       payload_template: |
+#         [{
+#           "labels": {
+#             "alertname": "AgentEscalation",
+#             "agent": "${agent}",
+#             "tool": "${tool}",
+#             "trigger": "${trigger_name}",
+#             "severity": "critical"
+#           },
+#           "annotations": {
+#             "summary": "Escalation trigger fired: ${trigger_name}",
+#             "matched_value": "${matched_value}"
+#           }
+#         }]
+#
+#     - name: email
+#       type: email
+#       smtp_host: "${SMTP_HOST}"
+#       smtp_port: 587
+#       from: "policy-guard@internal"
+#       to:
+#         - "oncall@example.com"
+#
+#     - name: pagerduty
+#       type: pagerduty
+#       routing_key: "${PD_ROUTING_KEY}"
+#       severity: critical
+
+# --------------------------------------------------------------------------
+# audit [v0.1]
+# --------------------------------------------------------------------------
+# Audit trail configuration. All tool calls matching audit: true are logged.
+# --------------------------------------------------------------------------
+audit:
+  # Multiple outputs supported simultaneously.
+  outputs:
+    - type: stdout              # [v0.1] Structured JSON to stdout
+      format: json              # json | text
+
+    - type: file                # [v0.1] JSONL file with rotation
+      path: /var/log/mcp-policy-guard/audit.jsonl
+      format: jsonl
+      rotate:
+        max_size_mb: 100
+        max_files: 10
+
+    - type: webhook             # [v0.1] Batched HTTP POST
+      endpoint: https://logging.internal/ingest
+      method: POST
+      headers:
+        Authorization: "Bearer ${LOG_TOKEN}"
+      batch:
+        max_size: 100           # Batch up to 100 events
+        flush_interval: 5s      # Or flush every 5s, whichever comes first
+
+    # [v0.3] OpenTelemetry span events
+    # - type: otel
+    #   endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+    #   protocol: grpc
+
+  # What to include in each audit record.
+  include:
+    tool_name: true
+    tool_arguments: true        # May contain sensitive data — see redaction
+    tool_response: true
+    agent_identity: true
+    timestamp: true
+    request_id: true
+    policy_decision: true       # allow | deny | held | approved | rejected
+    approval_metadata: true     # Who approved, when, latency
+    latency: true
+
+  # Redaction rules applied before audit output.
+  redaction:
+    # Redact specific JSON fields in tool arguments/responses.
+    fields:
+      - "password"
+      - "secret"
+      - "api_key"
+      - "token"
+      - "ssn"
+      - "credit_card"
+    # Regex patterns to redact from string values.
+    patterns:
+      - name: credit_card
+        regex: '\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+        replacement: "[REDACTED:credit_card]"
+      - name: ssn
+        regex: '\b\d{3}-\d{2}-\d{4}\b'
+        replacement: "[REDACTED:ssn]"
+
+# --------------------------------------------------------------------------
+# rules [v0.1]
+# --------------------------------------------------------------------------
+# Ordered list of policy rules. First match wins.
+# Each rule matches on tool name (glob) and optionally on agent identity.
+#
+# v0.1 actions:
+#   allow             - Forward the tool call
+#   deny              - Reject with error
+#   require_approval  - Hold for human approval
+#   audit_only        - Forward but flag in audit log
+#
+# v0.1 match conditions:
+#   tools (glob)      - Glob patterns on tool names
+#   agent.identity    - Glob pattern on agent identity
+#
+# Added in later versions:
+#   arguments.cel     - [v0.2] CEL expression over tool call arguments
+#   escalate          - [v0.2] Fire escalation webhook on match
+#   time_window       - [v0.3] Cron-based activation window
+#   mutate action     - [v0.3] Modify arguments before forwarding
+# --------------------------------------------------------------------------
+rules:
+
+  # --- Example 1: Deny all tools not on the approved list ----------------
+  # (This is auto-generated when agent_card is set and the card has
+  #  governance.approvedActionList. Explicit rules override.)
+
+  # --- Example 2: High-risk tool requires approval -----------------------
+  - name: "destructive-db-ops"
+    description: "Destructive database operations require human approval"
+    match:
+      tools:
+        - "database.execute_query"
+        - "database.drop_*"
+        - "database.delete_*"
+      # [v0.2] adds CEL match on arguments:
+      # arguments:
+      #   cel: >
+      #     args.sql.matches('(?i)(DELETE|DROP|TRUNCATE|ALTER)')
+    action: require_approval
+    approval:
+      channel: terminal         # Reference to approval.channels[].name
+      timeout: 120s
+      on_timeout: reject
+      message: "Destructive SQL operation detected. Review before proceeding."
+
+  # --- Example 3: Escalation on high-value transactions [v0.2] -----------
+  # Uncomment when running v0.2+.
+  # - name: "high-value-payment"
+  #   description: "Payments over $1M trigger escalation to oncall"
+  #   match:
+  #     tools:
+  #       - "payments.submit"
+  #       - "payments.authorize"
+  #     arguments:
+  #       cel: "double(args.amount) > 1000000.0"
+  #   action: allow
+  #   escalate:
+  #     channel: oncall
+  #     trigger_name: "high-value-payment"
+
+  # --- Example 4: Argument mutation [v0.3] --------------------------------
+  # - name: "redact-pii-in-logging"
+  #   description: "Strip SSNs from log query arguments"
+  #   match:
+  #     tools:
+  #       - "logging.search"
+  #   action: mutate
+  #   mutate:
+  #     arguments:
+  #       - op: replace
+  #         path: "/query"
+  #         cel: 'args.query.replaceAll("\\b\\d{3}-\\d{2}-\\d{4}\\b", "[REDACTED]")'
+
+  # --- Example 5: Time-window restriction [v0.3] -------------------------
+  # - name: "no-deploys-during-freeze"
+  #   description: "Block deployment tools during change freeze"
+  #   match:
+  #     tools:
+  #       - "deploy.*"
+  #       - "release.*"
+  #     time_window:
+  #       active_cron: "0 0 * * 5-0"
+  #       timezone: "America/New_York"
+  #   action: deny
+  #   deny_message: "Deployments blocked during weekend change freeze"
+
+  # --- Example 6: Agent-specific rule [v0.1] -----------------------------
+  - name: "restrict-intern-agent"
+    description: "Intern agent limited to read-only tools"
+    match:
+      agent:
+        identity: "intern-research-agent"
+      tools:
+        - "*"
+    # Without CEL (v0.1), this denies ALL tools for this agent.
+    # To allow read-only tools, add explicit allow rules above this one
+    # matching the read/search/list tools for this agent identity.
+    action: deny
+    deny_message: "This agent is restricted to read-only operations"
+
+  # --- Example 7: Catch-all allow with audit [v0.1] ----------------------
+  - name: "default-allow"
+    description: "Allow remaining approved tools with full audit"
+    match:
+      tools:
+        - "*"
+    action: allow
+    audit: true
+
+# --------------------------------------------------------------------------
+# [v0.2] rate_limits
+# --------------------------------------------------------------------------
+# Per-tool and per-agent rate limiting. Applied before rule matching.
+# Uncomment when running v0.2+.
+# --------------------------------------------------------------------------
+# rate_limits:
+#   - name: "global-tool-limit"
+#     match:
+#       tools: ["*"]
+#     limit:
+#       requests: 100
+#       window: 60s
+#     key: agent
+#     on_exceed: deny
+#     deny_message: "Rate limit exceeded: 100 requests per 60s"
+#
+#   - name: "llm-call-limit"
+#     match:
+#       tools: ["llm.*"]
+#     limit:
+#       requests: 20
+#       window: 60s
+#     key: agent
+#
+#   - name: "payment-burst-limit"
+#     match:
+#       tools: ["payments.*"]
+#     limit:
+#       requests: 5
+#       window: 10s
+#     key: agent
+#     on_exceed: deny
+#     escalate:
+#       channel: oncall
+#       trigger_name: "payment-burst"
+
+# --------------------------------------------------------------------------
+# [v0.2] content_filters
+# --------------------------------------------------------------------------
+# Inspect tool call arguments and responses for sensitive content.
+# Applied after rule matching, before forwarding (arguments) and
+# before returning (responses).
+# Uncomment when running v0.2+.
+# --------------------------------------------------------------------------
+# content_filters:
+#   - name: "pii-detection"
+#     description: "Detect and block PII in outbound tool arguments"
+#     direction: request
+#     match:
+#       tools: ["*"]
+#     patterns:
+#       - name: ssn
+#         regex: '\b\d{3}-\d{2}-\d{4}\b'
+#       - name: credit_card
+#         regex: '\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+#       - name: email
+#         regex: '(?i)\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
+#     action: block
+#     block_message: "Tool call blocked: PII detected in arguments"
+#     escalate:
+#       channel: oncall
+#       trigger_name: "pii-leak-attempt"
+#
+#   - name: "prompt-injection-scan"
+#     description: "Detect prompt injection in MCP server responses"
+#     direction: response
+#     match:
+#       tools: ["*"]
+#     patterns:
+#       - name: role_override
+#         regex: '(?i)(ignore previous|you are now|system prompt|<\|im_start\|>)'
+#       - name: instruction_injection
+#         regex: '(?i)(do not follow|disregard|override instructions)'
+#     action: flag
+#     audit: true

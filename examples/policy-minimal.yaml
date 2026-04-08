@@ -1,0 +1,18 @@
+# Minimal v0.1 policy: derive everything from the agent card.
+# No explicit rules needed — the card's approvedActionList becomes
+# the tool allowlist, and humanOversightModel sets approval requirements.
+
+version: 1
+
+agent_card:
+  path: ./agent-card.json
+  watch: true
+
+defaults:
+  action: deny
+  audit: true
+
+audit:
+  outputs:
+    - type: stdout
+      format: json

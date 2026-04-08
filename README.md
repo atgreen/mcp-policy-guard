@@ -118,7 +118,32 @@ Or in your MCP client config (e.g., Claude Code):
 }
 ```
 
+### stdio-to-HTTP bridge (MCP client talks stdio, server is remote)
+
+Use `--upstream` without `--listen` to read JSON-RPC from stdin and forward to an HTTP MCP server. The MCP client (Claude Code, etc.) thinks it's talking to a local stdio server, but the actual server is remote.
+
+```bash
+mcp-policy-guard \
+  --policy policy.yaml \
+  --upstream http://mcp-gateway:8080/mcp
+```
+
+In your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "remote-db": {
+      "command": "mcp-policy-guard",
+      "args": ["--policy", "policy.yaml", "--upstream", "http://mcp-gateway:8080/mcp"]
+    }
+  }
+}
+```
+
 ### HTTP mode (reverse proxy in front of a gateway)
+
+Use `--listen` + `--upstream` to run as an HTTP reverse proxy. For Kubernetes sidecar deployments.
 
 ```bash
 mcp-policy-guard \
@@ -139,7 +164,15 @@ mcp-policy-guard \
 
 ## How it works
 
-mcp-policy-guard spawns the MCP server as a child process and relays stdio. It parses each line as JSON-RPC 2.0, and for `tools/call` requests:
+Three deployment modes, same policy engine:
+
+| Mode | Command | Use case |
+|---|---|---|
+| **stdio** | `--policy p.yaml -- <cmd>` | Wrap a local MCP server process |
+| **stdio-to-HTTP** | `--policy p.yaml --upstream <url>` | MCP client speaks stdio, server is remote |
+| **HTTP proxy** | `--policy p.yaml --listen :8081 --upstream <url>` | Kubernetes sidecar or standalone proxy |
+
+For every `tools/call` request, regardless of mode:
 
 1. Checks **rate limits** — rejects if the agent/tool has exceeded its budget
 2. Runs **content filters** — blocks if PII or injection patterns are detected in arguments
@@ -147,10 +180,11 @@ mcp-policy-guard spawns the MCP server as a child process and relays stdio. It p
 4. **allow** — forwards to the server
 5. **deny** — returns a JSON-RPC error to the client
 6. **require_approval** — prompts via `/dev/tty` or webhook, then forwards or rejects
-7. Fires **escalation webhooks** if the matched rule, rate limit, or content filter is configured to escalate
-8. Emits a structured **audit record** for every intercepted call
+7. **mutate** — modifies arguments via JSON Patch before forwarding
+8. Fires **escalation webhooks** if the matched rule, rate limit, or content filter is configured to escalate
+9. Emits a structured **audit record** for every intercepted call
 
-All other MCP methods (`initialize`, `tools/list`, `resources/*`, `prompts/*`, `ping`) pass through unmodified.
+`tools/list` responses are filtered to hide denied tools. All other MCP methods pass through unmodified.
 
 ## Agent card integration
 
@@ -173,6 +207,24 @@ The card's `governance.approvedActionList` becomes a tool allowlist. If `humanOv
 ## Policy schema
 
 The policy file is validated against `policy-schema.json` (JSON Schema Draft 2020-12) on load. See `examples/policy-full.yaml` for an annotated reference and `examples/policy-minimal.yaml` for a card-only configuration.
+
+## Policy hot-reload
+
+mcp-policy-guard watches the policy file for changes and reloads automatically. No restart needed.
+
+- **Regular files:** save the file. The watcher picks up the `WRITE` event.
+- **Kubernetes ConfigMap mounts:** ConfigMap updates replace the `..data` symlink. The watcher picks up the `CREATE` event.
+
+You'll see in the logs:
+
+```
+level=INFO msg="policy file changed, reloading" path=policy.yaml event=WRITE
+level=INFO msg="policy reloaded" rules=5
+```
+
+**What reloads on the fly:** rules, defaults, rate limits, content filters, escalation triggers.
+
+**What requires a restart:** audit emitters (adding/removing output targets), approval channels (adding new channel types), rate limit backend (switching in-memory to Redis), transport mode.
 
 ## Complements, does not replace, your MCP gateway
 

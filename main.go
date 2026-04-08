@@ -54,18 +54,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine mode
-	httpMode := *listenAddr != ""
+	// Determine mode:
+	//   1. --listen + --upstream  → HTTP reverse proxy (listens on port, forwards to upstream)
+	//   2. --upstream (no listen) → stdio-to-HTTP bridge (reads stdio, forwards to upstream)
+	//   3. -- <command>           → stdio proxy (spawns child process)
+	httpListenMode := *listenAddr != ""
+	stdioBridgeMode := !httpListenMode && *upstream != ""
 	childArgs := flag.Args()
 
-	if httpMode {
+	if httpListenMode {
 		if *upstream == "" {
-			slog.Error("--upstream is required in HTTP mode")
+			slog.Error("--upstream is required with --listen")
 			os.Exit(1)
 		}
-	} else {
+	} else if !stdioBridgeMode {
 		if len(childArgs) == 0 {
-			slog.Error("no child command specified after -- (or use --listen for HTTP mode)")
+			slog.Error("specify a child command after --, or use --upstream for HTTP upstream")
 			flag.Usage()
 			os.Exit(1)
 		}
@@ -173,16 +177,14 @@ func main() {
 		cancel()
 	}()
 
-	if httpMode {
-		// HTTP reverse proxy mode
+	if httpListenMode {
+		// HTTP reverse proxy mode: listen on port, forward to upstream
 		identityFunc := func(r *http.Request) string {
-			// Try X-Agent-Id header first, then JWT sub, then static
 			if id := r.Header.Get("X-Agent-Id"); id != "" {
 				return id
 			}
 			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				// Simple JWT sub extraction would go here
-				// For now, use the static identity
+				_ = auth // JWT sub extraction would go here
 			}
 			return identity
 		}
@@ -194,8 +196,18 @@ func main() {
 			slog.Error("HTTP proxy exited with error", "error", err)
 			os.Exit(1)
 		}
+	} else if stdioBridgeMode {
+		// stdio-to-HTTP bridge: read JSON-RPC from stdin, forward to HTTP upstream
+		slog.Info("stdio-to-HTTP bridge mode", "upstream", *upstream)
+		proxy := transport.NewStdioBridge(eng, pipeline, redactor, approvalReg, pol.Approval,
+			limiter, cfEngine, escalator, identity, *upstream)
+
+		if err := proxy.Run(ctx); err != nil {
+			slog.Error("stdio bridge exited with error", "error", err)
+			os.Exit(1)
+		}
 	} else {
-		// stdio proxy mode
+		// stdio proxy mode: spawn child process, relay stdio
 		proxy := transport.NewStdioProxy(eng, pipeline, redactor, approvalReg, pol.Approval,
 			limiter, cfEngine, escalator, identity, childArgs)
 

@@ -82,13 +82,13 @@ func TestLoad_SchemaViolation_MissingRulesAndCard(t *testing.T) {
 func TestLoad_SchemaViolation_UnknownField(t *testing.T) {
 	setupSchema(t)
 
-	// v0.3 fields like time_window should still be rejected
+	// Unknown top-level fields should be rejected
 	tmp := filepath.Join(t.TempDir(), "unknown.yaml")
-	os.WriteFile(tmp, []byte("version: 1\nrules:\n  - name: x\n    match:\n      tools: ['*']\n      time_window:\n        active_cron: '0 0 * * *'\n    action: allow\n"), 0o644)
+	os.WriteFile(tmp, []byte("version: 1\nrules:\n  - name: x\n    match:\n      tools: ['*']\n    action: allow\nfuture_field: true\n"), 0o644)
 
 	_, err := Load(tmp)
 	if err == nil {
-		t.Error("expected error for v0.3 field time_window")
+		t.Error("expected error for unknown top-level field")
 	}
 }
 

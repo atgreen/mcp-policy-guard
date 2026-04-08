@@ -221,6 +221,17 @@ func buildAuditEmitters(cfg *policy.AuditConfig) ([]audit.Emitter, error) {
 			e := audit.NewWebhookEmitter(out.Endpoint, method, out.Headers, maxBatch, interval)
 			emitters = append(emitters, e)
 
+		case "otel":
+			protocol := out.Protocol
+			if protocol == "" {
+				protocol = "grpc"
+			}
+			e, err := audit.NewOTelEmitter(out.Endpoint, protocol)
+			if err != nil {
+				return nil, fmt.Errorf("creating OTel emitter: %w", err)
+			}
+			emitters = append(emitters, e)
+
 		default:
 			slog.Warn("unknown audit output type, skipping", "type", out.Type)
 		}

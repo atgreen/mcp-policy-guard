@@ -1,0 +1,36 @@
+version: 1
+
+defaults:
+  action: deny
+  audit: true
+
+identity:
+  sources:
+    - type: static
+      value: "test-agent"
+
+audit:
+  outputs:
+    - type: stdout
+      format: json
+
+rules:
+  - name: "mutate-inject-trace"
+    description: "Inject trace_id into echo arguments"
+    match:
+      tools:
+        - "echo"
+    action: mutate
+    mutate:
+      arguments:
+        - op: add
+          path: "/trace_id"
+          value: "injected-trace-123"
+
+  - name: "allow-echo"
+    match:
+      tools:
+        - "echo"
+    action: allow
+
+  # database.drop_table has no allow rule — will be filtered from tools/list

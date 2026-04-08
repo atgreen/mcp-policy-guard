@@ -62,7 +62,7 @@ type ApprovalConfig struct {
 // ApprovalChannel defines a named approval mechanism.
 type ApprovalChannel struct {
 	Name         string            `yaml:"name"`
-	Type         string            `yaml:"type"` // terminal | webhook
+	Type         string            `yaml:"type"` // terminal | webhook | slack
 	ShowArgs     *bool             `yaml:"show_args,omitempty"`
 	ShowContext  *bool             `yaml:"show_context,omitempty"`
 	Fallback     string            `yaml:"fallback,omitempty"`
@@ -71,6 +71,9 @@ type ApprovalChannel struct {
 	Headers      map[string]string `yaml:"headers,omitempty"`
 	CallbackMode string            `yaml:"callback_mode,omitempty"` // callback | poll
 	PollInterval Duration          `yaml:"poll_interval,omitempty"`
+	WebhookURL   string            `yaml:"webhook_url,omitempty"`   // slack
+	Channel      string            `yaml:"channel,omitempty"`       // slack
+	CallbackURL  string            `yaml:"callback_url,omitempty"`  // slack
 }
 
 // AuditConfig defines audit trail settings.
@@ -82,7 +85,7 @@ type AuditConfig struct {
 
 // AuditOutput defines where audit records are sent.
 type AuditOutput struct {
-	Type     string            `yaml:"type"` // stdout | file | webhook
+	Type     string            `yaml:"type"` // stdout | file | webhook | otel
 	Format   string            `yaml:"format,omitempty"`
 	Path     string            `yaml:"path,omitempty"`
 	Rotate   *AuditRotate      `yaml:"rotate,omitempty"`
@@ -90,6 +93,7 @@ type AuditOutput struct {
 	Method   string            `yaml:"method,omitempty"`
 	Headers  map[string]string `yaml:"headers,omitempty"`
 	Batch    *AuditBatch       `yaml:"batch,omitempty"`
+	Protocol string            `yaml:"protocol,omitempty"` // otel: grpc | http
 }
 
 // AuditRotate configures file rotation.
@@ -135,23 +139,44 @@ type Rule struct {
 	Name        string          `yaml:"name"`
 	Description string          `yaml:"description,omitempty"`
 	Match       RuleMatch       `yaml:"match"`
-	Action      string          `yaml:"action"` // allow | deny | require_approval | audit_only
+	Action      string          `yaml:"action"` // allow | deny | require_approval | audit_only | mutate
 	DenyMessage string          `yaml:"deny_message,omitempty"`
 	Audit       *bool           `yaml:"audit,omitempty"`
 	Approval    *RuleApproval   `yaml:"approval,omitempty"`
 	Escalate    *RuleEscalation `yaml:"escalate,omitempty"`
+	Mutate      *RuleMutate     `yaml:"mutate,omitempty"`
+}
+
+// RuleMutate defines argument mutations for mutate rules.
+type RuleMutate struct {
+	Arguments []MutateOp `yaml:"arguments"`
+}
+
+// MutateOp is a single argument mutation operation.
+type MutateOp struct {
+	Op    string      `yaml:"op"`              // add | remove | replace
+	Path  string      `yaml:"path"`            // JSON Pointer (RFC 6901)
+	Value interface{} `yaml:"value,omitempty"`  // static value
+	CEL   string      `yaml:"cel,omitempty"`   // CEL expression for computed value
 }
 
 // RuleMatch defines the conditions for a rule to fire.
 type RuleMatch struct {
-	Tools     []string       `yaml:"tools"`
-	Agent     *AgentMatch    `yaml:"agent,omitempty"`
-	Arguments *ArgumentMatch `yaml:"arguments,omitempty"`
+	Tools      []string       `yaml:"tools"`
+	Agent      *AgentMatch    `yaml:"agent,omitempty"`
+	Arguments  *ArgumentMatch `yaml:"arguments,omitempty"`
+	TimeWindow *TimeWindow    `yaml:"time_window,omitempty"`
 }
 
 // ArgumentMatch defines a CEL expression to match on tool call arguments.
 type ArgumentMatch struct {
 	CEL string `yaml:"cel"`
+}
+
+// TimeWindow restricts when a rule is active.
+type TimeWindow struct {
+	ActiveCron string `yaml:"active_cron"`
+	Timezone   string `yaml:"timezone,omitempty"`
 }
 
 // AgentMatch restricts a rule to a specific agent identity.

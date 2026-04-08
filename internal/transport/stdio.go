@@ -17,12 +17,16 @@ import (
 
 	"github.com/atgreen/mcp-policy-guard/internal/approval"
 	"github.com/atgreen/mcp-policy-guard/internal/audit"
+	"encoding/json"
+
 	"github.com/atgreen/mcp-policy-guard/internal/contentfilter"
 	"github.com/atgreen/mcp-policy-guard/internal/engine"
 	"github.com/atgreen/mcp-policy-guard/internal/escalation"
 	"github.com/atgreen/mcp-policy-guard/internal/jsonrpc"
+	"github.com/atgreen/mcp-policy-guard/internal/mutate"
 	"github.com/atgreen/mcp-policy-guard/internal/policy"
 	"github.com/atgreen/mcp-policy-guard/internal/ratelimit"
+	"github.com/atgreen/mcp-policy-guard/internal/toolfilter"
 )
 
 // StdioProxy intercepts MCP JSON-RPC messages between a client and
@@ -118,14 +122,57 @@ func (p *StdioProxy) Run(ctx context.Context) error {
 	return nil
 }
 
-// relayServerToClient copies lines from child stdout to our stdout verbatim.
+// relayServerToClient copies lines from child stdout to our stdout,
+// intercepting tools/list responses to filter denied tools.
 func (p *StdioProxy) relayServerToClient(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		fmt.Fprintf(os.Stdout, "%s\n", line)
+
+		// Try to intercept tools/list responses for filtering.
+		// We detect these by checking if the response has a "result"
+		// with a "tools" array. This is a heuristic — we track pending
+		// tools/list request IDs for precise matching.
+		if p.shouldFilterToolsList(line) {
+			filtered := p.filterToolsListResponse(line)
+			fmt.Fprintf(os.Stdout, "%s\n", filtered)
+		} else {
+			fmt.Fprintf(os.Stdout, "%s\n", line)
+		}
 	}
+}
+
+func (p *StdioProxy) shouldFilterToolsList(line []byte) bool {
+	// Quick heuristic: check if it looks like a response with a "tools" field
+	var probe struct {
+		Result *struct {
+			Tools json.RawMessage `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(line, &probe); err != nil {
+		return false
+	}
+	return probe.Result != nil && len(probe.Result.Tools) > 0
+}
+
+func (p *StdioProxy) filterToolsListResponse(line []byte) []byte {
+	var resp jsonrpc.Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return line
+	}
+	if resp.Result == nil {
+		return line
+	}
+
+	filtered := toolfilter.FilterToolsList(resp.Result, p.engine, p.agentIdentity)
+	resp.Result = filtered
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return line
+	}
+	return out
 }
 
 // interceptClientToServer reads lines from our stdin, intercepts tools/call,
@@ -273,6 +320,9 @@ func (p *StdioProxy) handleToolCall(ctx context.Context, req *jsonrpc.Request, o
 
 	case engine.RequireApproval:
 		p.handleApproval(ctx, req, tcp, originalLine, childStdin, requestID, result, start)
+
+	case engine.Mutate:
+		p.handleMutate(req, tcp, originalLine, childStdin, requestID, result, start)
 	}
 }
 
@@ -356,6 +406,47 @@ func (p *StdioProxy) handleApproval(
 		rec.DenyMessage = reason
 		rec.Approver = approvalResult.Approver
 		rec.ApprovalLatencyMs = approvalResult.LatencyMs
+		p.emitAudit(rec)
+	}
+}
+
+func (p *StdioProxy) handleMutate(
+	req *jsonrpc.Request,
+	tcp *jsonrpc.ToolCallParams,
+	originalLine []byte,
+	childStdin io.Writer,
+	requestID string,
+	result engine.EvalResult,
+	start time.Time,
+) {
+	if result.Rule == nil || result.Rule.Mutate == nil {
+		// No mutation config — forward unchanged
+		fmt.Fprintf(childStdin, "%s\n", originalLine)
+		return
+	}
+
+	mutated, err := mutate.Apply(result.Rule.Mutate.Arguments, tcp.Arguments, p.engine.CEL(), tcp.Name, p.agentIdentity)
+	if err != nil {
+		slog.Warn("mutation failed, forwarding original", "error", err, "rule", result.Rule.Name)
+		fmt.Fprintf(childStdin, "%s\n", originalLine)
+		return
+	}
+
+	// Rebuild the JSON-RPC request with mutated arguments
+	newParams := jsonrpc.ToolCallParams{Name: tcp.Name, Arguments: mutated}
+	paramsJSON, _ := json.Marshal(newParams)
+	newReq := jsonrpc.Request{
+		Jsonrpc: req.Jsonrpc,
+		Method:  req.Method,
+		Params:  paramsJSON,
+		ID:      req.ID,
+	}
+	newLine, _ := json.Marshal(newReq)
+	fmt.Fprintf(childStdin, "%s\n", newLine)
+
+	if result.Audit {
+		rec := p.buildAuditRecord(requestID, tcp, result, start)
+		rec.Decision = "mutated"
 		p.emitAudit(rec)
 	}
 }

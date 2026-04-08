@@ -73,6 +73,35 @@ func (e *CELEvaluator) Evaluate(expr string, toolName, agentIdentity string, arg
 	return out.Type() != types.ErrType && out != ref.Val(nil), nil
 }
 
+// EvaluateRaw runs a CEL expression and returns the raw result value.
+// Used by mutation to compute replacement values.
+func (e *CELEvaluator) EvaluateRaw(expr string, toolName, agentIdentity string, arguments json.RawMessage) (interface{}, error) {
+	prg, err := e.getOrCompile(expr)
+	if err != nil {
+		return nil, err
+	}
+
+	var args interface{}
+	if len(arguments) > 0 {
+		if err := json.Unmarshal(arguments, &args); err != nil {
+			return nil, fmt.Errorf("parsing arguments for CEL: %w", err)
+		}
+	}
+	if args == nil {
+		args = map[string]interface{}{}
+	}
+
+	out, _, err := prg.Eval(map[string]interface{}{
+		"args":  args,
+		"tool":  toolName,
+		"agent": agentIdentity,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("evaluating CEL expression: %w", err)
+	}
+	return out.Value(), nil
+}
+
 func (e *CELEvaluator) getOrCompile(expr string) (cel.Program, error) {
 	e.mu.RLock()
 	prg, ok := e.cache[expr]

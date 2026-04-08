@@ -63,6 +63,8 @@ func NewRegistry(cfg *policy.ApprovalConfig) *Registry {
 			r.handlers[ch.Name] = NewTerminalHandler(showArgs)
 		case "webhook":
 			r.handlers[ch.Name] = NewWebhookHandler(ch)
+		case "slack":
+			r.handlers[ch.Name] = NewSlackHandler(ch)
 		}
 	}
 	return r

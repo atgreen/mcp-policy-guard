@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/mcp-policy-guard/policy/v0.2",
-  "title": "mcp-policy-guard v0.2 policy",
-  "description": "Policy file schema for mcp-policy-guard v0.2. Adds CEL expressions, escalation, rate limiting, and content filters.",
+  "$id": "https://github.com/mcp-policy-guard/policy/v0.3",
+  "title": "mcp-policy-guard v0.3 policy",
+  "description": "Policy file schema for mcp-policy-guard v0.3. Adds mutate action, time windows, Slack approval, OTel audit, tools/list filtering.",
   "type": "object",
   "required": ["version"],
   "anyOf": [
@@ -125,6 +125,14 @@
             "callback_mode": { "type": "string", "enum": ["callback", "poll"] },
             "poll_interval": { "$ref": "#/$defs/duration" }
           }, "required": ["name", "type", "endpoint"]
+        },
+        {
+          "properties": {
+            "name": { "type": "string" }, "type": { "const": "slack" },
+            "webhook_url": { "type": "string", "format": "uri" },
+            "channel": { "type": "string" },
+            "callback_url": { "type": "string", "format": "uri" }
+          }, "required": ["name", "type", "webhook_url"]
         }
       ]
     },
@@ -186,7 +194,8 @@
       "oneOf": [
         { "properties": { "type": { "const": "stdout" }, "format": { "type": "string", "enum": ["json", "text"] } }, "required": ["type"] },
         { "properties": { "type": { "const": "file" }, "path": { "type": "string" }, "format": { "type": "string", "enum": ["jsonl"] }, "rotate": { "type": "object", "additionalProperties": false, "properties": { "max_size_mb": { "type": "integer", "minimum": 1 }, "max_files": { "type": "integer", "minimum": 1 } } } }, "required": ["type", "path"] },
-        { "properties": { "type": { "const": "webhook" }, "endpoint": { "type": "string", "format": "uri" }, "method": { "type": "string", "enum": ["POST", "PUT"] }, "headers": { "type": "object", "additionalProperties": { "type": "string" } }, "batch": { "type": "object", "additionalProperties": false, "properties": { "max_size": { "type": "integer", "minimum": 1 }, "flush_interval": { "$ref": "#/$defs/duration" } } } }, "required": ["type", "endpoint"] }
+        { "properties": { "type": { "const": "webhook" }, "endpoint": { "type": "string", "format": "uri" }, "method": { "type": "string", "enum": ["POST", "PUT"] }, "headers": { "type": "object", "additionalProperties": { "type": "string" } }, "batch": { "type": "object", "additionalProperties": false, "properties": { "max_size": { "type": "integer", "minimum": 1 }, "flush_interval": { "$ref": "#/$defs/duration" } } } }, "required": ["type", "endpoint"] },
+        { "properties": { "type": { "const": "otel" }, "endpoint": { "type": "string" }, "protocol": { "type": "string", "enum": ["grpc", "http"], "default": "grpc" } }, "required": ["type", "endpoint"] }
       ]
     },
 
@@ -230,11 +239,12 @@
         "name": { "type": "string" },
         "description": { "type": "string" },
         "match": { "$ref": "#/$defs/rule_match" },
-        "action": { "type": "string", "enum": ["allow", "deny", "require_approval", "audit_only"] },
+        "action": { "type": "string", "enum": ["allow", "deny", "require_approval", "audit_only", "mutate"] },
         "deny_message": { "type": "string" },
         "audit": { "type": "boolean" },
         "approval": { "$ref": "#/$defs/rule_approval" },
-        "escalate": { "$ref": "#/$defs/rule_escalation" }
+        "escalate": { "$ref": "#/$defs/rule_escalation" },
+        "mutate": { "$ref": "#/$defs/rule_mutate" }
       },
       "if": { "properties": { "action": { "const": "require_approval" } } },
       "then": { "required": ["name", "match", "action", "approval"] }
@@ -255,7 +265,16 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["cel"],
-          "properties": { "cel": { "type": "string", "description": "CEL expression evaluated against tool call arguments." } }
+          "properties": { "cel": { "type": "string" } }
+        },
+        "time_window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["active_cron"],
+          "properties": {
+            "active_cron": { "type": "string", "description": "Cron expression defining when this rule is active." },
+            "timezone": { "type": "string", "description": "IANA timezone name, e.g. America/New_York." }
+          }
         }
       }
     },
@@ -338,6 +357,29 @@
         "block_message": { "type": "string" },
         "audit": { "type": "boolean" },
         "escalate": { "$ref": "#/$defs/rule_escalation" }
+      }
+    },
+
+    "rule_mutate": {
+      "type": "object",
+      "required": ["arguments"],
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["op", "path"],
+            "additionalProperties": false,
+            "properties": {
+              "op": { "type": "string", "enum": ["add", "remove", "replace"] },
+              "path": { "type": "string", "description": "JSON Pointer (RFC 6901) to the field." },
+              "value": { "description": "Static value for add/replace." },
+              "cel": { "type": "string", "description": "CEL expression computing the value." }
+            }
+          }
+        }
       }
     },
 

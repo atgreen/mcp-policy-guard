@@ -18,6 +18,7 @@ const (
 	Deny
 	RequireApproval
 	AuditOnly
+	Mutate
 )
 
 func (d Decision) String() string {
@@ -30,6 +31,8 @@ func (d Decision) String() string {
 		return "require_approval"
 	case AuditOnly:
 		return "audit_only"
+	case Mutate:
+		return "mutate"
 	default:
 		return "unknown"
 	}
@@ -102,6 +105,11 @@ func (e *Engine) Policy() *policy.Policy {
 	return e.pol
 }
 
+// CEL returns the CEL evaluator for use by mutation.
+func (e *Engine) CEL() *CELEvaluator {
+	return e.cel
+}
+
 func (e *Engine) matchRule(rule *policy.Rule, toolName, agentIdentity string, args json.RawMessage) bool {
 	// Check agent identity if specified
 	if rule.Match.Agent != nil && rule.Match.Agent.Identity != "" {
@@ -120,6 +128,13 @@ func (e *Engine) matchRule(rule *policy.Rule, toolName, agentIdentity string, ar
 	}
 	if !toolMatched {
 		return false
+	}
+
+	// Check time window if specified
+	if rule.Match.TimeWindow != nil {
+		if !isInTimeWindow(rule.Match.TimeWindow) {
+			return false
+		}
 	}
 
 	// Check CEL expression if specified
@@ -169,6 +184,8 @@ func resultFromRule(rule *policy.Rule, defaults policy.Defaults) EvalResult {
 		result.Decision = RequireApproval
 	case "audit_only":
 		result.Decision = AuditOnly
+	case "mutate":
+		result.Decision = Mutate
 	default:
 		result.Decision = Deny
 		result.DenyMessage = "unknown action: " + rule.Action
@@ -194,6 +211,8 @@ func resultFromDefaults(defaults policy.Defaults) EvalResult {
 		result.Decision = Allow
 	case "audit_only":
 		result.Decision = AuditOnly
+	case "mutate":
+		result.Decision = Mutate
 	default:
 		result.Decision = Deny
 		result.DenyMessage = defaults.DenyMessage

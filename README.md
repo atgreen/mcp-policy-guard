@@ -33,6 +33,13 @@ MCP Client ── tools/call ──▶ mcp-policy-guard ──▶ MCP Server
 - **Content filters** — regex-based PII detection and prompt injection scanning on request/response, with block/redact/flag actions
 - **Escalation webhooks** — fire-and-forget notifications to Alertmanager, PagerDuty, or generic webhooks on rule match, rate limit exceed, or content filter hit
 
+**Advanced controls (v0.3)**
+- **Argument mutation** — JSON Patch (RFC 6902) with optional CEL-computed values to modify tool arguments before forwarding (redact PII, inject context, clamp values)
+- **Time-window rules** — cron-based activation windows with timezone support for change freezes and scheduled restrictions
+- **tools/list filtering** — denied tools are hidden from the agent's tool discovery, reducing prompt pollution and attack surface
+- **Slack approval** — interactive Slack messages with approve/reject buttons for team-based human-in-the-loop workflows
+- **OTel audit output** — emit audit records as OpenTelemetry spans via OTLP gRPC or HTTP
+
 ## Quick start
 
 ```bash
@@ -169,7 +176,7 @@ volumes:
 
 ## Roadmap
 
-- **v0.3** — argument mutation, time-window rules, Slack approval, OTel audit output, `tools/list` filtering, Redis-backed rate limiting
+- **v0.4** — HTTP reverse proxy transport, Redis-backed rate limiting, approval delegation rules, Kubernetes ConfigMap watching
 
 See [PRD.md](PRD.md) for the full product requirements.
 

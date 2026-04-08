@@ -1,58 +1,45 @@
 # mcp-policy-guard
 
-**Experimental** — MCP protocol-aware policy middleware for AI agent governance.
+**Experimental** -- MCP protocol-aware policy middleware for AI agent governance.
 
 mcp-policy-guard sits between an MCP client and server, intercepting JSON-RPC tool calls and enforcing policies defined in a YAML file. It is designed to close the gap between the [FINOS Agent Card](https://github.com/finos/ai-reference-architecture-library/tree/main/Library/reference-architecture/agent-card) governance model and what MCP gateways enforce today.
 
 It is not a gateway. It does not do routing, federation, or authentication. It does one thing: **intercept MCP tool calls and apply policy**.
 
 ```
-MCP Client ── tools/call ──▶ mcp-policy-guard ──▶ MCP Server
-                                    │
-                              ┌─────┴─────┐
-                              │  approve?  │
-                              │  allow?    │
-                              │  log?      │
-                              │  redact?   │
-                              └───────────┘
+MCP Client -- tools/call --> mcp-policy-guard --> MCP Server
+                                    |              (or gateway)
+                              +-----+-----+
+                              |  approve?  |
+                              |  allow?    |
+                              |  log?      |
+                              |  redact?   |
+                              +-----------+
 ```
 
 ## Features
 
-**Core (v0.1)**
-- **Tool allowlist** — glob matching on tool names, first-match-wins rules, default deny
-- **Human-in-the-loop approval** — interactive `/dev/tty` prompt (Unix) with webhook fallback
-- **Audit logging** — structured JSON to stderr, JSONL file with rotation, batched webhook POST
-- **Redaction** — field-name and regex-based redaction of sensitive data in audit records
-- **Agent card derivation** — reads a FINOS Agent Card and derives rules from `approvedActionList` and `humanOversightModel`
-- **Policy validation** — YAML with `${VAR}` expansion, validated against JSON Schema on load
-
-**Policy intelligence (v0.2)**
-- **CEL expressions** — match rules on tool call arguments (e.g., `double(args.amount) > 1000000.0`, `args.sql.matches('(?i)DROP')`)
-- **Rate limiting** — in-memory token bucket, per-agent/per-tool/global keys, configurable deny messages
-- **Content filters** — regex-based PII detection and prompt injection scanning on request/response, with block/redact/flag actions
-- **Escalation webhooks** — fire-and-forget notifications to Alertmanager, PagerDuty, or generic webhooks on rule match, rate limit exceed, or content filter hit
-
-**Advanced controls (v0.3)**
-- **Argument mutation** — JSON Patch (RFC 6902) with optional CEL-computed values to modify tool arguments before forwarding (redact PII, inject context, clamp values)
-- **Time-window rules** — cron-based activation windows with timezone support for change freezes and scheduled restrictions
-- **tools/list filtering** — denied tools are hidden from the agent's tool discovery, reducing prompt pollution and attack surface
-- **Slack approval** — interactive Slack messages with approve/reject buttons for team-based human-in-the-loop workflows
-- **OTel audit output** — emit audit records as OpenTelemetry spans via OTLP gRPC or HTTP
-
-**Production deployment (v0.4)**
-- **HTTP reverse proxy** — sits in front of any streamable HTTP MCP endpoint, full policy enforcement including SSE keepalives during approval holds
-- **Redis-backed rate limiting** — shared counters across multiple instances via `--redis` flag
-- **Approval delegation** — route approval requests to different channels based on tool name or agent identity patterns
-- **Policy hot-reload** — file watcher detects changes and reloads policy without restart (works with Kubernetes ConfigMap mounts)
+- **Tool allowlist** -- glob matching on tool names, first-match-wins ordered rules, default deny
+- **CEL expressions** -- match rules on tool call arguments (e.g., `double(args.amount) > 1000000.0`)
+- **Human-in-the-loop approval** -- interactive terminal prompt, webhook, or Slack channels with fallback chains
+- **Argument mutation** -- JSON Patch (RFC 6902) with optional CEL-computed values
+- **Rate limiting** -- in-memory or Redis-backed token bucket, per-agent/per-tool/global keys
+- **Content filters** -- regex-based PII detection and prompt injection scanning with block/redact/flag actions
+- **Escalation webhooks** -- fire-and-forget notifications to Alertmanager, PagerDuty, or generic endpoints
+- **Time-window rules** -- cron-based activation windows with timezone support
+- **tools/list filtering** -- denied tools hidden from agent discovery
+- **Audit logging** -- structured JSON, JSONL files, webhook, or OpenTelemetry spans
+- **Redaction** -- field-name and regex-based redaction of sensitive data in audit records
+- **Agent card derivation** -- reads a FINOS Agent Card and derives rules automatically
+- **Approval delegation** -- route approvals to different channels based on tool or agent patterns
+- **Policy hot-reload** -- file watcher reloads on change, works with Kubernetes ConfigMap mounts
+- **mTLS** -- client certificates for mutual TLS to upstream endpoints
 
 ## Quick start
 
 ```bash
 go install github.com/atgreen/mcp-policy-guard@latest
 ```
-
-### stdio mode (wrap an MCP server)
 
 Create a policy file (`policy.yaml`):
 
@@ -63,11 +50,6 @@ defaults:
   action: deny
   audit: true
 
-identity:
-  sources:
-    - type: static
-      value: "my-agent"
-
 audit:
   outputs:
     - type: stdout
@@ -76,7 +58,7 @@ audit:
 rules:
   - name: "allow-read"
     match:
-      tools: ["read_*", "search_*", "list_*"]
+      tools: ["read_*", "search_*"]
     action: allow
 
   - name: "approve-writes"
@@ -87,16 +69,11 @@ rules:
       channel: terminal
       timeout: 120s
       on_timeout: reject
-      message: "Write operation detected. Approve?"
 
 approval:
   channels:
     - name: terminal
       type: terminal
-      fallback: webhook
-    - name: webhook
-      type: webhook
-      endpoint: https://approvals.internal/api/review
 ```
 
 Wrap an MCP server:
@@ -105,66 +82,9 @@ Wrap an MCP server:
 mcp-policy-guard --policy policy.yaml -- mcp-server-postgres --db prod
 ```
 
-Or in your MCP client config (e.g., Claude Code):
+See the [documentation](docs/) for detailed guides on all deployment modes, policy configuration, and features.
 
-```json
-{
-  "mcpServers": {
-    "database": {
-      "command": "mcp-policy-guard",
-      "args": ["--policy", "policy.yaml", "--", "mcp-server-postgres", "--db", "prod"]
-    }
-  }
-}
-```
-
-### stdio-to-HTTP bridge (MCP client talks stdio, server is remote)
-
-Use `--upstream` without `--listen` to read JSON-RPC from stdin and forward to an HTTP MCP server. The MCP client (Claude Code, etc.) thinks it's talking to a local stdio server, but the actual server is remote.
-
-```bash
-mcp-policy-guard \
-  --policy policy.yaml \
-  --upstream http://mcp-gateway:8080/mcp
-```
-
-In your MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "remote-db": {
-      "command": "mcp-policy-guard",
-      "args": ["--policy", "policy.yaml", "--upstream", "http://mcp-gateway:8080/mcp"]
-    }
-  }
-}
-```
-
-### HTTP mode (reverse proxy in front of a gateway)
-
-Use `--listen` + `--upstream` to run as an HTTP reverse proxy. For Kubernetes sidecar deployments.
-
-```bash
-mcp-policy-guard \
-  --policy policy.yaml \
-  --listen :8081 \
-  --upstream http://mcp-gateway:8080/mcp
-```
-
-With Redis-backed rate limiting for multi-instance deployments:
-
-```bash
-mcp-policy-guard \
-  --policy policy.yaml \
-  --listen :8081 \
-  --upstream http://mcp-gateway:8080/mcp \
-  --redis redis://redis:6379
-```
-
-## How it works
-
-Three deployment modes, same policy engine:
+## Deployment modes
 
 | Mode | Command | Use case |
 |---|---|---|
@@ -172,97 +92,29 @@ Three deployment modes, same policy engine:
 | **stdio-to-HTTP** | `--policy p.yaml --upstream <url>` | MCP client speaks stdio, server is remote |
 | **HTTP proxy** | `--policy p.yaml --listen :8081 --upstream <url>` | Kubernetes sidecar or standalone proxy |
 
-For every `tools/call` request, regardless of mode:
+All three modes use the same policy engine and enforce the same rules. See [Deployment Modes](docs/deployment-modes.md) for details.
 
-1. Checks **rate limits** — rejects if the agent/tool has exceeded its budget
-2. Runs **content filters** — blocks if PII or injection patterns are detected in arguments
-3. Matches the tool name (and optionally CEL expressions on arguments) against **policy rules** (first match wins)
-4. **allow** — forwards to the server
-5. **deny** — returns a JSON-RPC error to the client
-6. **require_approval** — prompts via `/dev/tty` or webhook, then forwards or rejects
-7. **mutate** — modifies arguments via JSON Patch before forwarding
-8. Fires **escalation webhooks** if the matched rule, rate limit, or content filter is configured to escalate
-9. Emits a structured **audit record** for every intercepted call
+## Documentation
 
-`tools/list` responses are filtered to hide denied tools. All other MCP methods pass through unmodified.
+- [Deployment Modes](docs/deployment-modes.md) -- stdio, stdio-to-HTTP bridge, HTTP reverse proxy
+- [Policy Reference](docs/policy-reference.md) -- complete policy file format with all fields
+- [Rules and Matching](docs/rules.md) -- tool globs, CEL expressions, time windows, first-match-wins
+- [Approval](docs/approval.md) -- terminal, webhook, and Slack channels, delegation, fallback chains
+- [Rate Limiting](docs/rate-limiting.md) -- in-memory and Redis backends, per-agent/per-tool/global keys
+- [Content Filters](docs/content-filters.md) -- PII detection, prompt injection scanning, block/redact/flag
+- [Audit Trail](docs/audit.md) -- outputs, redaction, OpenTelemetry integration
+- [Agent Card Integration](docs/agent-card.md) -- deriving policy from FINOS Agent Cards
+- [Hot-Reload](docs/hot-reload.md) -- live policy updates, Kubernetes ConfigMap support
+- [TLS and mTLS](docs/tls.md) -- client certificates, custom CA, upstream TLS configuration
 
-## Agent card integration
+## Complements your MCP gateway
 
-Point mcp-policy-guard at a [FINOS Agent Card](https://github.com/finos/ai-reference-architecture-library/tree/main/Library/reference-architecture/agent-card) to derive rules automatically:
-
-```yaml
-version: 1
-agent_card:
-  path: ./agent-card.json
-  watch: true
-defaults:
-  action: deny
-audit:
-  outputs:
-    - type: stdout
-```
-
-The card's `governance.approvedActionList` becomes a tool allowlist. If `humanOversightModel` is `human-approves-every-action` (A1), all tools require approval. Explicit rules in the policy file override card-derived rules.
-
-## Policy schema
-
-The policy file is validated against `policy-schema.json` (JSON Schema Draft 2020-12) on load. See `examples/policy-full.yaml` for an annotated reference and `examples/policy-minimal.yaml` for a card-only configuration.
-
-## Policy hot-reload
-
-mcp-policy-guard watches the policy file for changes and reloads automatically. No restart needed.
-
-- **Regular files:** save the file. The watcher picks up the `WRITE` event.
-- **Kubernetes ConfigMap mounts:** ConfigMap updates replace the `..data` symlink. The watcher picks up the `CREATE` event.
-
-You'll see in the logs:
-
-```
-level=INFO msg="policy file changed, reloading" path=policy.yaml event=WRITE
-level=INFO msg="policy reloaded" rules=5
-```
-
-**What reloads on the fly:** rules, defaults, rate limits, content filters, escalation triggers.
-
-**What requires a restart:** audit emitters (adding/removing output targets), approval channels (adding new channel types), rate limit backend (switching in-memory to Redis), transport mode.
-
-## Complements, does not replace, your MCP gateway
-
-mcp-policy-guard is designed to work alongside [Kuadrant's mcp-gateway](https://github.com/Kuadrant/mcp-gateway) or any other MCP gateway. The gateway handles routing, federation, and authentication. The guard handles agent-card-specific governance that gateways don't cover yet — tool allowlists derived from the card, human-in-the-loop approval, and semantic audit trails.
-
-In Kubernetes, run it as a sidecar:
-
-```yaml
-containers:
-  - name: agent
-    env:
-      - name: MCP_ENDPOINT
-        value: "http://localhost:8081/mcp"
-  - name: policy-guard
-    image: ghcr.io/atgreen/mcp-policy-guard:latest
-    args:
-      - --policy=/etc/policy/policy.yaml
-      - --listen=:8081
-      - --upstream=http://mcp-gateway.mcp-system:8080/mcp
-    volumeMounts:
-      - name: policy
-        mountPath: /etc/policy
-volumes:
-  - name: policy
-    configMap:
-      name: agent-policy
-```
-
-## Roadmap
-
-- **v1.0** — Stable API, Helm chart, container image, comprehensive documentation
-
-See [PRD.md](PRD.md) for the full product requirements.
+mcp-policy-guard works alongside [Kuadrant's mcp-gateway](https://github.com/Kuadrant/mcp-gateway) or any other MCP gateway. The gateway handles routing, federation, and authentication. The guard handles agent-card-specific governance -- tool allowlists, human-in-the-loop approval, content filtering, and semantic audit trails.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE).
 
 ## Status
 
-**Experimental.** The API, policy schema, and CLI flags may change without notice. Not recommended for production use without thorough testing in your environment.
+**Experimental.** The API, policy schema, and CLI flags may change without notice.

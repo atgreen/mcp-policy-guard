@@ -1,4 +1,4 @@
-# Minimal v0.1 policy: derive everything from the agent card.
+# Minimal policy: derive everything from the agent card.
 # No explicit rules needed — the card's approvedActionList becomes
 # the tool allowlist, and humanOversightModel sets approval requirements.
 

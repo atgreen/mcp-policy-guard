@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/mcp-policy-guard/policy/v0.3",
-  "title": "mcp-policy-guard v0.3 policy",
-  "description": "Policy file schema for mcp-policy-guard v0.3. Adds mutate action, time windows, Slack approval, OTel audit, tools/list filtering.",
+  "$id": "https://github.com/atgreen/mcp-policy-guard/policy-schema",
+  "title": "mcp-policy-guard policy",
+  "description": "Policy file schema for mcp-policy-guard.",
   "type": "object",
   "required": ["version"],
   "anyOf": [

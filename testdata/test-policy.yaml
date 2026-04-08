@@ -1,0 +1,29 @@
+version: 1
+
+defaults:
+  action: deny
+  audit: true
+
+identity:
+  sources:
+    - type: static
+      value: "test-agent"
+
+audit:
+  outputs:
+    - type: stdout
+      format: json
+
+rules:
+  - name: "allow-echo"
+    match:
+      tools:
+        - "echo"
+    action: allow
+
+  - name: "deny-drop"
+    match:
+      tools:
+        - "database.drop_*"
+    action: deny
+    deny_message: "Destructive operations are not permitted"

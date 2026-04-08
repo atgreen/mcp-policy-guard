@@ -10,13 +10,16 @@ import (
 
 // Policy is the top-level policy configuration.
 type Policy struct {
-	Version   int              `yaml:"version"`
-	AgentCard *AgentCardConfig `yaml:"agent_card,omitempty"`
-	Defaults  *Defaults        `yaml:"defaults,omitempty"`
-	Identity  *Identity        `yaml:"identity,omitempty"`
-	Approval  *ApprovalConfig  `yaml:"approval,omitempty"`
-	Audit     *AuditConfig     `yaml:"audit,omitempty"`
-	Rules     []Rule           `yaml:"rules,omitempty"`
+	Version        int               `yaml:"version"`
+	AgentCard      *AgentCardConfig  `yaml:"agent_card,omitempty"`
+	Defaults       *Defaults         `yaml:"defaults,omitempty"`
+	Identity       *Identity         `yaml:"identity,omitempty"`
+	Approval       *ApprovalConfig   `yaml:"approval,omitempty"`
+	Escalation     *EscalationConfig `yaml:"escalation,omitempty"`
+	Audit          *AuditConfig      `yaml:"audit,omitempty"`
+	Rules          []Rule            `yaml:"rules,omitempty"`
+	RateLimits     []RateLimit       `yaml:"rate_limits,omitempty"`
+	ContentFilters []ContentFilter   `yaml:"content_filters,omitempty"`
 }
 
 // AgentCardConfig specifies how to load a FINOS Agent Card.
@@ -50,9 +53,10 @@ type IdentitySource struct {
 
 // ApprovalConfig defines approval channels and global settings.
 type ApprovalConfig struct {
-	Channels  []ApprovalChannel `yaml:"channels"`
-	Timeout   Duration          `yaml:"timeout,omitempty"`
-	OnTimeout string            `yaml:"on_timeout,omitempty"` // reject | allow
+	Channels           []ApprovalChannel `yaml:"channels"`
+	Timeout            Duration          `yaml:"timeout,omitempty"`
+	OnTimeout          string            `yaml:"on_timeout,omitempty"`            // reject | escalate | allow
+	EscalateOnTimeoutTo string           `yaml:"escalate_on_timeout_to,omitempty"` // escalation channel name
 }
 
 // ApprovalChannel defines a named approval mechanism.
@@ -128,19 +132,26 @@ type RedactionPattern struct {
 
 // Rule is a single policy rule.
 type Rule struct {
-	Name        string       `yaml:"name"`
-	Description string       `yaml:"description,omitempty"`
-	Match       RuleMatch    `yaml:"match"`
-	Action      string       `yaml:"action"` // allow | deny | require_approval | audit_only
-	DenyMessage string       `yaml:"deny_message,omitempty"`
-	Audit       *bool        `yaml:"audit,omitempty"`
-	Approval    *RuleApproval `yaml:"approval,omitempty"`
+	Name        string          `yaml:"name"`
+	Description string          `yaml:"description,omitempty"`
+	Match       RuleMatch       `yaml:"match"`
+	Action      string          `yaml:"action"` // allow | deny | require_approval | audit_only
+	DenyMessage string          `yaml:"deny_message,omitempty"`
+	Audit       *bool           `yaml:"audit,omitempty"`
+	Approval    *RuleApproval   `yaml:"approval,omitempty"`
+	Escalate    *RuleEscalation `yaml:"escalate,omitempty"`
 }
 
 // RuleMatch defines the conditions for a rule to fire.
 type RuleMatch struct {
-	Tools []string    `yaml:"tools"`
-	Agent *AgentMatch `yaml:"agent,omitempty"`
+	Tools     []string       `yaml:"tools"`
+	Agent     *AgentMatch    `yaml:"agent,omitempty"`
+	Arguments *ArgumentMatch `yaml:"arguments,omitempty"`
+}
+
+// ArgumentMatch defines a CEL expression to match on tool call arguments.
+type ArgumentMatch struct {
+	CEL string `yaml:"cel"`
 }
 
 // AgentMatch restricts a rule to a specific agent identity.
@@ -152,8 +163,81 @@ type AgentMatch struct {
 type RuleApproval struct {
 	Channel   string   `yaml:"channel"`
 	Timeout   Duration `yaml:"timeout,omitempty"`
-	OnTimeout string   `yaml:"on_timeout,omitempty"` // reject | allow
+	OnTimeout string   `yaml:"on_timeout,omitempty"` // reject | escalate | allow
 	Message   string   `yaml:"message,omitempty"`
+}
+
+// RuleEscalation fires an escalation when a rule matches.
+type RuleEscalation struct {
+	Channel     string `yaml:"channel"`
+	TriggerName string `yaml:"trigger_name"`
+}
+
+// EscalationConfig defines escalation channels.
+type EscalationConfig struct {
+	Channels []EscalationChannel `yaml:"channels"`
+}
+
+// EscalationChannel defines a named escalation target.
+type EscalationChannel struct {
+	Name            string            `yaml:"name"`
+	Type            string            `yaml:"type"` // webhook | email | pagerduty
+	Endpoint        string            `yaml:"endpoint,omitempty"`
+	Method          string            `yaml:"method,omitempty"`
+	Headers         map[string]string `yaml:"headers,omitempty"`
+	PayloadTemplate string            `yaml:"payload_template,omitempty"`
+	SMTPHost        string            `yaml:"smtp_host,omitempty"`
+	SMTPPort        int               `yaml:"smtp_port,omitempty"`
+	From            string            `yaml:"from,omitempty"`
+	To              []string          `yaml:"to,omitempty"`
+	RoutingKey      string            `yaml:"routing_key,omitempty"`
+	Severity        string            `yaml:"severity,omitempty"`
+}
+
+// RateLimit defines a rate limiting rule.
+type RateLimit struct {
+	Name       string          `yaml:"name"`
+	Match      RateLimitMatch  `yaml:"match"`
+	Limit      RateLimitSpec   `yaml:"limit"`
+	Key        string          `yaml:"key,omitempty"`          // agent | tool | global
+	OnExceed   string          `yaml:"on_exceed,omitempty"`    // deny | escalate
+	DenyMessage string         `yaml:"deny_message,omitempty"`
+	Escalate   *RuleEscalation `yaml:"escalate,omitempty"`
+}
+
+// RateLimitMatch defines which tools a rate limit applies to.
+type RateLimitMatch struct {
+	Tools []string `yaml:"tools"`
+}
+
+// RateLimitSpec defines the rate limit parameters.
+type RateLimitSpec struct {
+	Requests int      `yaml:"requests"`
+	Window   Duration `yaml:"window"`
+}
+
+// ContentFilter defines a content inspection rule.
+type ContentFilter struct {
+	Name         string              `yaml:"name"`
+	Description  string              `yaml:"description,omitempty"`
+	Direction    string              `yaml:"direction"` // request | response | both
+	Match        ContentFilterMatch  `yaml:"match"`
+	Patterns     []ContentPattern    `yaml:"patterns"`
+	Action       string              `yaml:"action"` // block | redact | flag
+	BlockMessage string              `yaml:"block_message,omitempty"`
+	Audit        *bool               `yaml:"audit,omitempty"`
+	Escalate     *RuleEscalation     `yaml:"escalate,omitempty"`
+}
+
+// ContentFilterMatch defines which tools a content filter applies to.
+type ContentFilterMatch struct {
+	Tools []string `yaml:"tools"`
+}
+
+// ContentPattern is a named regex pattern for content detection.
+type ContentPattern struct {
+	Name  string `yaml:"name"`
+	Regex string `yaml:"regex"`
 }
 
 // Duration is a time.Duration that unmarshals from strings like "300s", "5m".

@@ -82,12 +82,45 @@ func TestLoad_SchemaViolation_MissingRulesAndCard(t *testing.T) {
 func TestLoad_SchemaViolation_UnknownField(t *testing.T) {
 	setupSchema(t)
 
+	// v0.3 fields like time_window should still be rejected
 	tmp := filepath.Join(t.TempDir(), "unknown.yaml")
-	os.WriteFile(tmp, []byte("version: 1\nrules:\n  - name: x\n    match:\n      tools: ['*']\n    action: allow\nrate_limits: []\n"), 0o644)
+	os.WriteFile(tmp, []byte("version: 1\nrules:\n  - name: x\n    match:\n      tools: ['*']\n      time_window:\n        active_cron: '0 0 * * *'\n    action: allow\n"), 0o644)
 
 	_, err := Load(tmp)
 	if err == nil {
-		t.Error("expected error for v0.2 field rate_limits")
+		t.Error("expected error for v0.3 field time_window")
+	}
+}
+
+func TestLoad_RateLimits_Accepted(t *testing.T) {
+	setupSchema(t)
+
+	yaml := `
+version: 1
+rules:
+  - name: allow-all
+    match:
+      tools: ['*']
+    action: allow
+rate_limits:
+  - name: global
+    match:
+      tools: ['*']
+    limit:
+      requests: 100
+      window: 60s
+    key: agent
+    on_exceed: deny
+`
+	tmp := filepath.Join(t.TempDir(), "rl.yaml")
+	os.WriteFile(tmp, []byte(yaml), 0o644)
+
+	pol, err := Load(tmp)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(pol.RateLimits) != 1 {
+		t.Errorf("RateLimits = %d, want 1", len(pol.RateLimits))
 	}
 }
 

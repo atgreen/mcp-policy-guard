@@ -2,6 +2,8 @@
 package engine
 
 import (
+	"encoding/json"
+	"log/slog"
 	"path"
 	"sync"
 
@@ -46,13 +48,19 @@ type Engine struct {
 	mu       sync.RWMutex
 	pol      *policy.Policy
 	defaults policy.Defaults
+	cel      *CELEvaluator
 }
 
 // New creates an engine from a loaded policy.
 func New(pol *policy.Policy) *Engine {
+	celEval, err := NewCELEvaluator()
+	if err != nil {
+		slog.Warn("failed to create CEL evaluator, CEL expressions will not work", "error", err)
+	}
 	return &Engine{
 		pol:      pol,
 		defaults: pol.EffectiveDefaults(),
+		cel:      celEval,
 	}
 }
 
@@ -66,13 +74,19 @@ func (e *Engine) Reload(pol *policy.Policy) {
 
 // Evaluate checks a tool call against the policy rules.
 // Returns the decision, matched rule, and whether to audit.
-func (e *Engine) Evaluate(toolName, agentIdentity string) EvalResult {
+// arguments is the raw JSON arguments for CEL evaluation (may be nil).
+func (e *Engine) Evaluate(toolName, agentIdentity string, arguments ...json.RawMessage) EvalResult {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	var args json.RawMessage
+	if len(arguments) > 0 {
+		args = arguments[0]
+	}
+
 	for i := range e.pol.Rules {
 		rule := &e.pol.Rules[i]
-		if matchRule(rule, toolName, agentIdentity) {
+		if e.matchRule(rule, toolName, agentIdentity, args) {
 			return resultFromRule(rule, e.defaults)
 		}
 	}
@@ -88,7 +102,7 @@ func (e *Engine) Policy() *policy.Policy {
 	return e.pol
 }
 
-func matchRule(rule *policy.Rule, toolName, agentIdentity string) bool {
+func (e *Engine) matchRule(rule *policy.Rule, toolName, agentIdentity string, args json.RawMessage) bool {
 	// Check agent identity if specified
 	if rule.Match.Agent != nil && rule.Match.Agent.Identity != "" {
 		if !globMatch(rule.Match.Agent.Identity, agentIdentity) {
@@ -97,12 +111,32 @@ func matchRule(rule *policy.Rule, toolName, agentIdentity string) bool {
 	}
 
 	// Check tool name against any pattern
+	toolMatched := false
 	for _, pattern := range rule.Match.Tools {
 		if globMatch(pattern, toolName) {
-			return true
+			toolMatched = true
+			break
 		}
 	}
-	return false
+	if !toolMatched {
+		return false
+	}
+
+	// Check CEL expression if specified
+	if rule.Match.Arguments != nil && rule.Match.Arguments.CEL != "" {
+		if e.cel == nil {
+			slog.Warn("CEL expression in rule but evaluator unavailable", "rule", rule.Name)
+			return false
+		}
+		matched, err := e.cel.Evaluate(rule.Match.Arguments.CEL, toolName, agentIdentity, args)
+		if err != nil {
+			slog.Warn("CEL evaluation error", "rule", rule.Name, "error", err)
+			return false
+		}
+		return matched
+	}
+
+	return true
 }
 
 // globMatch matches a tool name against a glob pattern.

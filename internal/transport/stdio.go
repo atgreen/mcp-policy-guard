@@ -17,9 +17,12 @@ import (
 
 	"github.com/atgreen/mcp-policy-guard/internal/approval"
 	"github.com/atgreen/mcp-policy-guard/internal/audit"
+	"github.com/atgreen/mcp-policy-guard/internal/contentfilter"
 	"github.com/atgreen/mcp-policy-guard/internal/engine"
+	"github.com/atgreen/mcp-policy-guard/internal/escalation"
 	"github.com/atgreen/mcp-policy-guard/internal/jsonrpc"
 	"github.com/atgreen/mcp-policy-guard/internal/policy"
+	"github.com/atgreen/mcp-policy-guard/internal/ratelimit"
 )
 
 // StdioProxy intercepts MCP JSON-RPC messages between a client and
@@ -30,6 +33,9 @@ type StdioProxy struct {
 	redactor      *audit.Redactor
 	approvalReg   *approval.Registry
 	approvalCfg   *policy.ApprovalConfig
+	rateLimiter   *ratelimit.Limiter
+	contentFilter *contentfilter.Engine
+	escalator     *escalation.Dispatcher
 	agentIdentity string
 	childArgs     []string
 }
@@ -41,6 +47,9 @@ func NewStdioProxy(
 	redactor *audit.Redactor,
 	approvalReg *approval.Registry,
 	approvalCfg *policy.ApprovalConfig,
+	rateLimiter *ratelimit.Limiter,
+	contentFilter *contentfilter.Engine,
+	escalator *escalation.Dispatcher,
 	agentIdentity string,
 	childArgs []string,
 ) *StdioProxy {
@@ -50,6 +59,9 @@ func NewStdioProxy(
 		redactor:      redactor,
 		approvalReg:   approvalReg,
 		approvalCfg:   approvalCfg,
+		rateLimiter:   rateLimiter,
+		contentFilter: contentFilter,
+		escalator:     escalator,
 		agentIdentity: agentIdentity,
 		childArgs:     childArgs,
 	}
@@ -168,8 +180,73 @@ func (p *StdioProxy) handleToolCall(ctx context.Context, req *jsonrpc.Request, o
 		return
 	}
 
-	// Evaluate policy
-	result := p.engine.Evaluate(tcp.Name, p.agentIdentity)
+	// Check rate limits first
+	if p.rateLimiter != nil {
+		rlResult := p.rateLimiter.Check(tcp.Name, p.agentIdentity)
+		if rlResult.Exceeded {
+			errResp := jsonrpc.MakeErrorResponse(req.ID, jsonrpc.PolicyDeniedCode,
+				rlResult.Message,
+				map[string]interface{}{
+					"rule":         rlResult.Rule.Name,
+					"policy_guard": true,
+					"rate_limited": true,
+				})
+			fmt.Fprintf(os.Stdout, "%s\n", errResp)
+			rec := p.buildAuditRecord(requestID, tcp, engine.EvalResult{Decision: engine.Deny, Audit: true}, start)
+			rec.Decision = "rate_limited"
+			rec.Rule = rlResult.Rule.Name
+			p.emitAudit(rec)
+			// Fire escalation if configured
+			if rlResult.Rule.Escalate != nil && p.escalator != nil {
+				p.escalator.Fire(rlResult.Rule.Escalate.Channel, escalation.Context{
+					Tool:        tcp.Name,
+					Agent:       p.agentIdentity,
+					TriggerName: rlResult.Rule.Escalate.TriggerName,
+				})
+			}
+			return
+		}
+	}
+
+	// Check content filters on request
+	if p.contentFilter != nil {
+		cfResult := p.contentFilter.CheckRequest(tcp.Name, tcp.Arguments)
+		if cfResult.Matched && cfResult.Action == "block" {
+			errResp := jsonrpc.MakeErrorResponse(req.ID, jsonrpc.PolicyDeniedCode,
+				cfResult.Message,
+				map[string]interface{}{
+					"filter":       cfResult.Filter.Name,
+					"policy_guard": true,
+					"content_blocked": true,
+				})
+			fmt.Fprintf(os.Stdout, "%s\n", errResp)
+			rec := p.buildAuditRecord(requestID, tcp, engine.EvalResult{Decision: engine.Deny, Audit: true}, start)
+			rec.Decision = "content_blocked"
+			rec.Rule = cfResult.Filter.Name
+			p.emitAudit(rec)
+			if cfResult.Filter.Escalate != nil && p.escalator != nil {
+				p.escalator.Fire(cfResult.Filter.Escalate.Channel, escalation.Context{
+					Tool:        tcp.Name,
+					Agent:       p.agentIdentity,
+					TriggerName: cfResult.Filter.Escalate.TriggerName,
+				})
+			}
+			return
+		}
+	}
+
+	// Evaluate policy rules
+	result := p.engine.Evaluate(tcp.Name, p.agentIdentity, tcp.Arguments)
+
+	// Fire escalation if rule has one
+	if result.Rule != nil && result.Rule.Escalate != nil && p.escalator != nil {
+		p.escalator.Fire(result.Rule.Escalate.Channel, escalation.Context{
+			Tool:        tcp.Name,
+			Agent:       p.agentIdentity,
+			Args:        string(tcp.Arguments),
+			TriggerName: result.Rule.Escalate.TriggerName,
+		})
+	}
 
 	switch result.Decision {
 	case engine.Allow, engine.AuditOnly:

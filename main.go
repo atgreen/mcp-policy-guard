@@ -17,8 +17,11 @@ import (
 	"github.com/atgreen/mcp-policy-guard/internal/agentcard"
 	"github.com/atgreen/mcp-policy-guard/internal/approval"
 	"github.com/atgreen/mcp-policy-guard/internal/audit"
+	"github.com/atgreen/mcp-policy-guard/internal/contentfilter"
 	"github.com/atgreen/mcp-policy-guard/internal/engine"
+	"github.com/atgreen/mcp-policy-guard/internal/escalation"
 	"github.com/atgreen/mcp-policy-guard/internal/policy"
+	"github.com/atgreen/mcp-policy-guard/internal/ratelimit"
 	"github.com/atgreen/mcp-policy-guard/internal/transport"
 )
 
@@ -103,8 +106,23 @@ func main() {
 	// Build approval registry
 	approvalReg := approval.NewRegistry(pol.Approval)
 
+	// Build rate limiter
+	limiter := ratelimit.NewLimiter(pol.RateLimits)
+	if len(pol.RateLimits) > 0 {
+		slog.Info("rate limits loaded", "count", len(pol.RateLimits))
+	}
+
+	// Build content filter engine
+	cfEngine := contentfilter.NewEngine(pol.ContentFilters)
+	if len(pol.ContentFilters) > 0 {
+		slog.Info("content filters loaded", "count", len(pol.ContentFilters))
+	}
+
+	// Build escalation dispatcher
+	escalator := escalation.NewDispatcher(pol.Escalation)
+
 	// Build and run stdio proxy
-	proxy := transport.NewStdioProxy(eng, pipeline, redactor, approvalReg, pol.Approval, identity, childArgs)
+	proxy := transport.NewStdioProxy(eng, pipeline, redactor, approvalReg, pol.Approval, limiter, cfEngine, escalator, identity, childArgs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

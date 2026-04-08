@@ -1,0 +1,59 @@
+version: 1
+
+defaults:
+  action: deny
+  audit: true
+
+identity:
+  sources:
+    - type: static
+      value: "test-agent"
+
+audit:
+  outputs:
+    - type: stdout
+      format: json
+
+rules:
+  - name: "high-value-deny"
+    match:
+      tools:
+        - "payments.*"
+      arguments:
+        cel: "double(args.amount) > 1000000.0"
+    action: deny
+    deny_message: "High-value transaction blocked by policy"
+
+  - name: "allow-payments"
+    match:
+      tools:
+        - "payments.*"
+    action: allow
+
+  - name: "allow-echo"
+    match:
+      tools:
+        - "echo"
+    action: allow
+
+rate_limits:
+  - name: "echo-limit"
+    match:
+      tools: ["echo"]
+    limit:
+      requests: 2
+      window: 60s
+    key: agent
+    on_exceed: deny
+    deny_message: "Echo rate limit exceeded"
+
+content_filters:
+  - name: "pii-block"
+    direction: request
+    match:
+      tools: ["*"]
+    patterns:
+      - name: ssn
+        regex: '\b\d{3}-\d{2}-\d{4}\b'
+    action: block
+    block_message: "PII detected in tool arguments"

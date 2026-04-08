@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/mcp-policy-guard/policy/v0.1",
-  "title": "mcp-policy-guard v0.1 policy",
-  "description": "Policy file schema for mcp-policy-guard v0.1. This schema defines exactly the fields supported by the v0.1 binary. Future versions will ship updated schemas.",
+  "$id": "https://github.com/mcp-policy-guard/policy/v0.2",
+  "title": "mcp-policy-guard v0.2 policy",
+  "description": "Policy file schema for mcp-policy-guard v0.2. Adds CEL expressions, escalation, rate limiting, and content filters.",
   "type": "object",
   "required": ["version"],
   "anyOf": [
@@ -16,26 +16,27 @@
       "const": 1,
       "description": "Schema version. Must be 1."
     },
-    "agent_card": {
-      "$ref": "#/$defs/agent_card"
-    },
-    "defaults": {
-      "$ref": "#/$defs/defaults"
-    },
-    "identity": {
-      "$ref": "#/$defs/identity"
-    },
-    "approval": {
-      "$ref": "#/$defs/approval_config"
-    },
-    "audit": {
-      "$ref": "#/$defs/audit_config"
-    },
+    "agent_card": { "$ref": "#/$defs/agent_card" },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "approval": { "$ref": "#/$defs/approval_config" },
+    "escalation": { "$ref": "#/$defs/escalation_config" },
+    "audit": { "$ref": "#/$defs/audit_config" },
     "rules": {
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/rule" },
       "description": "Ordered list of policy rules. First match wins."
+    },
+    "rate_limits": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rate_limit" },
+      "description": "Rate limiting rules. Applied before rule matching."
+    },
+    "content_filters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/content_filter" },
+      "description": "Content inspection rules. Applied after rule matching."
     }
   },
 
@@ -51,25 +52,10 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "path": {
-          "type": "string",
-          "description": "Local file path to agent card JSON."
-        },
-        "url": {
-          "type": "string",
-          "format": "uri",
-          "description": "URL to fetch agent card JSON."
-        },
-        "configmap": {
-          "type": "string",
-          "pattern": "^[a-z0-9-]+/[a-z0-9-]+$",
-          "description": "Kubernetes ConfigMap reference as namespace/name."
-        },
-        "watch": {
-          "type": "boolean",
-          "default": false,
-          "description": "Re-read agent card on change (file or ConfigMap)."
-        }
+        "path": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "configmap": { "type": "string", "pattern": "^[a-z0-9-]+/[a-z0-9-]+$" },
+        "watch": { "type": "boolean", "default": false }
       }
     },
 
@@ -77,98 +63,46 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "action": {
-          "type": "string",
-          "enum": ["deny", "allow", "audit_only"],
-          "default": "deny",
-          "description": "Action for tool calls that match no explicit rule."
-        },
-        "audit": {
-          "type": "boolean",
-          "default": true,
-          "description": "Log every tool call regardless of action."
-        },
-        "deny_message": {
-          "type": "string",
-          "default": "Tool call not permitted by policy",
-          "description": "Error message returned to client on default deny."
-        }
+        "action": { "type": "string", "enum": ["deny", "allow", "audit_only"], "default": "deny" },
+        "audit": { "type": "boolean", "default": true },
+        "deny_message": { "type": "string", "default": "Tool call not permitted by policy" }
       }
     },
 
     "identity": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["sources"],
       "properties": {
         "sources": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/identity_source" },
-          "description": "Ordered list of identity sources. First match wins."
+          "items": { "$ref": "#/$defs/identity_source" }
         }
-      },
-      "required": ["sources"]
+      }
     },
 
     "identity_source": {
       "type": "object",
       "required": ["type"],
       "oneOf": [
-        {
-          "properties": {
-            "type": { "const": "jwt_claim" },
-            "claim": { "type": "string" },
-            "header": { "type": "string", "default": "Authorization" }
-          },
-          "required": ["type", "claim"]
-        },
-        {
-          "properties": {
-            "type": { "const": "header" },
-            "header": { "type": "string" }
-          },
-          "required": ["type", "header"]
-        },
-        {
-          "properties": {
-            "type": { "const": "client_cert" },
-            "field": { "type": "string", "enum": ["cn", "san_dns", "san_uri"] }
-          },
-          "required": ["type", "field"]
-        },
-        {
-          "properties": {
-            "type": { "const": "static" },
-            "value": { "type": "string" }
-          },
-          "required": ["type", "value"]
-        }
+        { "properties": { "type": { "const": "jwt_claim" }, "claim": { "type": "string" }, "header": { "type": "string" } }, "required": ["type", "claim"] },
+        { "properties": { "type": { "const": "header" }, "header": { "type": "string" } }, "required": ["type", "header"] },
+        { "properties": { "type": { "const": "client_cert" }, "field": { "type": "string", "enum": ["cn", "san_dns", "san_uri"] } }, "required": ["type", "field"] },
+        { "properties": { "type": { "const": "static" }, "value": { "type": "string" } }, "required": ["type", "value"] }
       ]
     },
 
     "approval_config": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["channels"],
       "properties": {
-        "channels": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/approval_channel" },
-          "description": "Named approval channels referenced by rules."
-        },
-        "timeout": {
-          "$ref": "#/$defs/duration",
-          "default": "300s",
-          "description": "Default max wait time for approval."
-        },
-        "on_timeout": {
-          "type": "string",
-          "enum": ["reject", "allow"],
-          "default": "reject",
-          "description": "Action when approval times out. 'escalate' added in v0.2."
-        }
-      },
-      "required": ["channels"]
+        "channels": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/approval_channel" } },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "on_timeout": { "type": "string", "enum": ["reject", "escalate", "allow"], "default": "reject" },
+        "escalate_on_timeout_to": { "type": "string", "description": "Escalation channel name when on_timeout is 'escalate'." }
+      }
     },
 
     "approval_channel": {
@@ -177,38 +111,60 @@
       "oneOf": [
         {
           "properties": {
-            "name": { "type": "string" },
-            "type": { "const": "terminal" },
-            "show_args": { "type": "boolean", "default": true },
-            "show_context": { "type": "boolean", "default": false },
-            "fallback": {
-              "type": "string",
-              "description": "Channel name to fall back to if /dev/tty is unavailable."
-            }
-          },
-          "required": ["name", "type"]
+            "name": { "type": "string" }, "type": { "const": "terminal" },
+            "show_args": { "type": "boolean" }, "show_context": { "type": "boolean" },
+            "fallback": { "type": "string" }
+          }, "required": ["name", "type"]
         },
         {
           "properties": {
-            "name": { "type": "string" },
-            "type": { "const": "webhook" },
+            "name": { "type": "string" }, "type": { "const": "webhook" },
             "endpoint": { "type": "string", "format": "uri" },
-            "method": { "type": "string", "enum": ["POST", "PUT"], "default": "POST" },
-            "headers": {
-              "type": "object",
-              "additionalProperties": { "type": "string" }
-            },
-            "callback_mode": {
-              "type": "string",
-              "enum": ["callback", "poll"],
-              "default": "callback"
-            },
-            "poll_interval": {
-              "$ref": "#/$defs/duration",
-              "default": "5s"
-            }
-          },
-          "required": ["name", "type", "endpoint"]
+            "method": { "type": "string", "enum": ["POST", "PUT"] },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "callback_mode": { "type": "string", "enum": ["callback", "poll"] },
+            "poll_interval": { "$ref": "#/$defs/duration" }
+          }, "required": ["name", "type", "endpoint"]
+        }
+      ]
+    },
+
+    "escalation_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channels"],
+      "properties": {
+        "channels": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/escalation_channel" } }
+      }
+    },
+
+    "escalation_channel": {
+      "type": "object",
+      "required": ["name", "type"],
+      "oneOf": [
+        {
+          "properties": {
+            "name": { "type": "string" }, "type": { "const": "webhook" },
+            "endpoint": { "type": "string", "format": "uri" },
+            "method": { "type": "string", "enum": ["POST", "PUT"] },
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "payload_template": { "type": "string" }
+          }, "required": ["name", "type", "endpoint"]
+        },
+        {
+          "properties": {
+            "name": { "type": "string" }, "type": { "const": "email" },
+            "smtp_host": { "type": "string" }, "smtp_port": { "type": "integer" },
+            "from": { "type": "string" },
+            "to": { "type": "array", "items": { "type": "string", "format": "email" }, "minItems": 1 }
+          }, "required": ["name", "type", "smtp_host", "from", "to"]
+        },
+        {
+          "properties": {
+            "name": { "type": "string" }, "type": { "const": "pagerduty" },
+            "routing_key": { "type": "string" },
+            "severity": { "type": "string", "enum": ["critical", "error", "warning", "info"] }
+          }, "required": ["name", "type", "routing_key"]
         }
       ]
     },
@@ -216,69 +172,21 @@
     "audit_config": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["outputs"],
       "properties": {
-        "outputs": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/audit_output" }
-        },
-        "include": {
-          "$ref": "#/$defs/audit_include"
-        },
-        "redaction": {
-          "$ref": "#/$defs/audit_redaction"
-        }
-      },
-      "required": ["outputs"]
+        "outputs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/audit_output" } },
+        "include": { "$ref": "#/$defs/audit_include" },
+        "redaction": { "$ref": "#/$defs/audit_redaction" }
+      }
     },
 
     "audit_output": {
       "type": "object",
       "required": ["type"],
       "oneOf": [
-        {
-          "properties": {
-            "type": { "const": "stdout" },
-            "format": { "type": "string", "enum": ["json", "text"], "default": "json" }
-          },
-          "required": ["type"]
-        },
-        {
-          "properties": {
-            "type": { "const": "file" },
-            "path": { "type": "string" },
-            "format": { "type": "string", "enum": ["jsonl"], "default": "jsonl" },
-            "rotate": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "max_size_mb": { "type": "integer", "minimum": 1 },
-                "max_files": { "type": "integer", "minimum": 1 }
-              }
-            }
-          },
-          "required": ["type", "path"]
-        },
-        {
-          "properties": {
-            "type": { "const": "webhook" },
-            "endpoint": { "type": "string", "format": "uri" },
-            "method": { "type": "string", "enum": ["POST", "PUT"], "default": "POST" },
-            "headers": {
-              "type": "object",
-              "additionalProperties": { "type": "string" }
-            },
-            "batch": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "max_size": { "type": "integer", "minimum": 1, "default": 100 },
-                "flush_interval": { "$ref": "#/$defs/duration", "default": "5s" }
-              }
-            }
-          },
-          "required": ["type", "endpoint"]
-        }
+        { "properties": { "type": { "const": "stdout" }, "format": { "type": "string", "enum": ["json", "text"] } }, "required": ["type"] },
+        { "properties": { "type": { "const": "file" }, "path": { "type": "string" }, "format": { "type": "string", "enum": ["jsonl"] }, "rotate": { "type": "object", "additionalProperties": false, "properties": { "max_size_mb": { "type": "integer", "minimum": 1 }, "max_files": { "type": "integer", "minimum": 1 } } } }, "required": ["type", "path"] },
+        { "properties": { "type": { "const": "webhook" }, "endpoint": { "type": "string", "format": "uri" }, "method": { "type": "string", "enum": ["POST", "PUT"] }, "headers": { "type": "object", "additionalProperties": { "type": "string" } }, "batch": { "type": "object", "additionalProperties": false, "properties": { "max_size": { "type": "integer", "minimum": 1 }, "flush_interval": { "$ref": "#/$defs/duration" } } } }, "required": ["type", "endpoint"] }
       ]
     },
 
@@ -286,15 +194,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "tool_name": { "type": "boolean", "default": true },
-        "tool_arguments": { "type": "boolean", "default": true },
-        "tool_response": { "type": "boolean", "default": true },
-        "agent_identity": { "type": "boolean", "default": true },
-        "timestamp": { "type": "boolean", "default": true },
-        "request_id": { "type": "boolean", "default": true },
-        "policy_decision": { "type": "boolean", "default": true },
-        "approval_metadata": { "type": "boolean", "default": true },
-        "latency": { "type": "boolean", "default": true }
+        "tool_name": { "type": "boolean" }, "tool_arguments": { "type": "boolean" },
+        "tool_response": { "type": "boolean" }, "agent_identity": { "type": "boolean" },
+        "timestamp": { "type": "boolean" }, "request_id": { "type": "boolean" },
+        "policy_decision": { "type": "boolean" }, "approval_metadata": { "type": "boolean" },
+        "latency": { "type": "boolean" }
       }
     },
 
@@ -302,15 +206,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "fields": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "JSON field names to redact from tool arguments/responses."
-        },
-        "patterns": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/redaction_pattern" }
-        }
+        "fields": { "type": "array", "items": { "type": "string" } },
+        "patterns": { "type": "array", "items": { "$ref": "#/$defs/redaction_pattern" } }
       }
     },
 
@@ -330,39 +227,17 @@
       "required": ["name", "match", "action"],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": "string",
-          "description": "Unique rule name for audit trail and error messages."
-        },
-        "description": {
-          "type": "string"
-        },
-        "match": {
-          "$ref": "#/$defs/rule_match"
-        },
-        "action": {
-          "type": "string",
-          "enum": ["allow", "deny", "require_approval", "audit_only"]
-        },
-        "deny_message": {
-          "type": "string",
-          "description": "Custom error message for deny actions."
-        },
-        "audit": {
-          "type": "boolean",
-          "description": "Override default audit setting for this rule."
-        },
-        "approval": {
-          "$ref": "#/$defs/rule_approval",
-          "description": "Required when action is 'require_approval'."
-        }
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "match": { "$ref": "#/$defs/rule_match" },
+        "action": { "type": "string", "enum": ["allow", "deny", "require_approval", "audit_only"] },
+        "deny_message": { "type": "string" },
+        "audit": { "type": "boolean" },
+        "approval": { "$ref": "#/$defs/rule_approval" },
+        "escalate": { "$ref": "#/$defs/rule_escalation" }
       },
-      "if": {
-        "properties": { "action": { "const": "require_approval" } }
-      },
-      "then": {
-        "required": ["name", "match", "action", "approval"]
-      }
+      "if": { "properties": { "action": { "const": "require_approval" } } },
+      "then": { "required": ["name", "match", "action", "approval"] }
     },
 
     "rule_match": {
@@ -370,21 +245,17 @@
       "required": ["tools"],
       "additionalProperties": false,
       "properties": {
-        "tools": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "type": "string" },
-          "description": "Glob patterns matching tool names."
-        },
+        "tools": { "type": "array", "minItems": 1, "items": { "type": "string" } },
         "agent": {
           "type": "object",
           "additionalProperties": false,
-          "properties": {
-            "identity": {
-              "type": "string",
-              "description": "Glob pattern matching agent identity."
-            }
-          }
+          "properties": { "identity": { "type": "string" } }
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cel"],
+          "properties": { "cel": { "type": "string", "description": "CEL expression evaluated against tool call arguments." } }
         }
       }
     },
@@ -394,30 +265,85 @@
       "required": ["channel"],
       "additionalProperties": false,
       "properties": {
-        "channel": {
-          "type": "string",
-          "description": "References approval.channels[].name."
+        "channel": { "type": "string" },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "on_timeout": { "type": "string", "enum": ["reject", "escalate", "allow"] },
+        "message": { "type": "string" }
+      }
+    },
+
+    "rule_escalation": {
+      "type": "object",
+      "required": ["channel", "trigger_name"],
+      "additionalProperties": false,
+      "properties": {
+        "channel": { "type": "string" },
+        "trigger_name": { "type": "string" }
+      }
+    },
+
+    "rate_limit": {
+      "type": "object",
+      "required": ["name", "match", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "match": {
+          "type": "object",
+          "required": ["tools"],
+          "additionalProperties": false,
+          "properties": { "tools": { "type": "array", "minItems": 1, "items": { "type": "string" } } }
         },
-        "timeout": {
-          "$ref": "#/$defs/duration",
-          "description": "Override global approval timeout."
+        "limit": {
+          "type": "object",
+          "required": ["requests", "window"],
+          "additionalProperties": false,
+          "properties": {
+            "requests": { "type": "integer", "minimum": 1 },
+            "window": { "$ref": "#/$defs/duration" }
+          }
         },
-        "on_timeout": {
-          "type": "string",
-          "enum": ["reject", "allow"],
-          "description": "Override global on_timeout."
+        "key": { "type": "string", "enum": ["agent", "tool", "global"], "default": "agent" },
+        "on_exceed": { "type": "string", "enum": ["deny", "escalate"], "default": "deny" },
+        "deny_message": { "type": "string" },
+        "escalate": { "$ref": "#/$defs/rule_escalation" }
+      }
+    },
+
+    "content_filter": {
+      "type": "object",
+      "required": ["name", "direction", "match", "patterns", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "direction": { "type": "string", "enum": ["request", "response", "both"] },
+        "match": {
+          "type": "object",
+          "required": ["tools"],
+          "additionalProperties": false,
+          "properties": { "tools": { "type": "array", "minItems": 1, "items": { "type": "string" } } }
         },
-        "message": {
-          "type": "string",
-          "description": "Message shown to the approver."
-        }
+        "patterns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "regex"],
+            "additionalProperties": false,
+            "properties": { "name": { "type": "string" }, "regex": { "type": "string", "format": "regex" } }
+          }
+        },
+        "action": { "type": "string", "enum": ["block", "redact", "flag"] },
+        "block_message": { "type": "string" },
+        "audit": { "type": "boolean" },
+        "escalate": { "$ref": "#/$defs/rule_escalation" }
       }
     },
 
     "duration": {
       "type": "string",
-      "pattern": "^[0-9]+(ms|s|m|h)$",
-      "description": "Duration string, e.g. '300s', '5m', '100ms'."
+      "pattern": "^[0-9]+(ms|s|m|h)$"
     }
   }
 }

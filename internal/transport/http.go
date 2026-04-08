@@ -39,6 +39,7 @@ type HTTPProxy struct {
 	upstream      string
 	listenAddr    string
 	identityFunc  func(*http.Request) string
+	client        *http.Client
 }
 
 // NewHTTPProxy creates an HTTP reverse proxy.
@@ -54,7 +55,11 @@ func NewHTTPProxy(
 	upstream string,
 	listenAddr string,
 	identityFunc func(*http.Request) string,
+	httpClient *http.Client,
 ) *HTTPProxy {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Minute}
+	}
 	return &HTTPProxy{
 		engine:        eng,
 		pipeline:      pipeline,
@@ -67,6 +72,7 @@ func NewHTTPProxy(
 		upstream:      upstream,
 		listenAddr:    listenAddr,
 		identityFunc:  identityFunc,
+		client:        httpClient,
 	}
 }
 
@@ -335,8 +341,7 @@ func (p *HTTPProxy) forwardAndRelay(w http.ResponseWriter, origReq *http.Request
 		}
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(upstreamReq)
+	resp, err := p.client.Do(upstreamReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
 		return
@@ -373,8 +378,7 @@ func (p *HTTPProxy) forwardAndRelaySSE(w http.ResponseWriter, origReq *http.Requ
 		}
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(upstreamReq)
+	resp, err := p.client.Do(upstreamReq)
 	if err != nil {
 		return
 	}

@@ -34,7 +34,7 @@ func setupHTTPProxy(t *testing.T, rules []policy.Rule, defaultAction string, ups
 	return NewHTTPProxy(eng, pipeline, nil, nil, nil,
 		ratelimit.NewLimiter(nil), contentfilter.NewEngine(nil),
 		escalation.NewDispatcher(nil), upstream.URL, ":0",
-		func(r *http.Request) string { return "test-agent" })
+		func(r *http.Request) string { return "test-agent" }, nil)
 }
 
 func TestHTTPProxy_AllowToolCall(t *testing.T) {

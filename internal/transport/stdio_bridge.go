@@ -56,7 +56,11 @@ func NewStdioBridge(
 	escalator *escalation.Dispatcher,
 	agentIdentity string,
 	upstream string,
+	httpClient *http.Client,
 ) *StdioBridge {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Minute}
+	}
 	return &StdioBridge{
 		engine:        eng,
 		pipeline:      pipeline,
@@ -68,7 +72,7 @@ func NewStdioBridge(
 		escalator:     escalator,
 		agentIdentity: agentIdentity,
 		upstream:      upstream,
-		client:        &http.Client{Timeout: 5 * time.Minute},
+		client:        httpClient,
 	}
 }
 

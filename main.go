@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/atgreen/mcp-policy-guard/internal/tlsconfig"
 	"github.com/atgreen/mcp-policy-guard/internal/agentcard"
 	"github.com/atgreen/mcp-policy-guard/internal/approval"
 	"github.com/atgreen/mcp-policy-guard/internal/audit"
@@ -37,6 +38,10 @@ func main() {
 	listenAddr := flag.String("listen", "", "HTTP listen address (e.g., :8081). Enables HTTP proxy mode.")
 	upstream := flag.String("upstream", "", "Upstream MCP endpoint URL (required for HTTP mode)")
 	redisURL := flag.String("redis", "", "Redis URL for shared rate limiting (e.g., redis://localhost:6379)")
+	tlsCert := flag.String("tls-cert", "", "Client certificate for mTLS to upstream (PEM file)")
+	tlsKey := flag.String("tls-key", "", "Client private key for mTLS to upstream (PEM file)")
+	tlsCA := flag.String("tls-ca", "", "CA certificate to verify upstream server (PEM file)")
+	tlsInsecure := flag.Bool("tls-insecure", false, "Skip TLS verification for upstream (not recommended)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  stdio:  mcp-policy-guard --policy <path> [options] -- <command> [args...]\n")
@@ -177,6 +182,21 @@ func main() {
 		cancel()
 	}()
 
+	// Build TLS-configured HTTP client for upstream connections
+	httpClient, err := tlsconfig.NewHTTPClient(tlsconfig.Options{
+		CertFile: *tlsCert,
+		KeyFile:  *tlsKey,
+		CAFile:   *tlsCA,
+		Insecure: *tlsInsecure,
+	})
+	if err != nil {
+		slog.Error("failed to configure TLS", "error", err)
+		os.Exit(1)
+	}
+	if *tlsCert != "" {
+		slog.Info("mTLS configured", "cert", *tlsCert)
+	}
+
 	if httpListenMode {
 		// HTTP reverse proxy mode: listen on port, forward to upstream
 		identityFunc := func(r *http.Request) string {
@@ -190,7 +210,7 @@ func main() {
 		}
 
 		proxy := transport.NewHTTPProxy(eng, pipeline, redactor, approvalReg, pol.Approval,
-			limiter, cfEngine, escalator, *upstream, *listenAddr, identityFunc)
+			limiter, cfEngine, escalator, *upstream, *listenAddr, identityFunc, httpClient)
 
 		if err := proxy.Run(ctx); err != nil {
 			slog.Error("HTTP proxy exited with error", "error", err)
@@ -200,7 +220,7 @@ func main() {
 		// stdio-to-HTTP bridge: read JSON-RPC from stdin, forward to HTTP upstream
 		slog.Info("stdio-to-HTTP bridge mode", "upstream", *upstream)
 		proxy := transport.NewStdioBridge(eng, pipeline, redactor, approvalReg, pol.Approval,
-			limiter, cfEngine, escalator, identity, *upstream)
+			limiter, cfEngine, escalator, identity, *upstream, httpClient)
 
 		if err := proxy.Run(ctx); err != nil {
 			slog.Error("stdio bridge exited with error", "error", err)
